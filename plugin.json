@@ -1,0 +1,11 @@
+{
+  "name": "CEC Remote",
+  "author": "tayicknay",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["cec", "hdmi", "remote", "utility"],
+    "description": "Map TV remote HDMI-CEC buttons to SteamOS actions (QAM, library, downloads, Steam menu).",
+    "image": "https://opengraph.githubassets.com/1/tayicknay/deck-cec-remote"
+  }
+}
