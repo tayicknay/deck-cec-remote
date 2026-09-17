@@ -28,7 +28,7 @@ Needs [Decky Loader](https://decky.xyz).
 
 ### Option A — ZIP from Actions / Releases
 
-Every push to `main` builds **`cec-remote.zip`**.
+Every push to `main` builds a Decky ZIP. The Actions artifact is named **`cec-remote`** — download that file and install it as-is (GitHub already wrapped the plugin folder). Releases attach `cec-remote.zip` the same way.
 
 - Decky → gear → Developer → **Install from ZIP**, or
 - On the Deck (with `gh` logged in):
@@ -64,6 +64,8 @@ Local ZIP without CI: `./scripts/package-zip.sh`
 4. Pick an action and save
 
 Mappings are stored under Decky’s plugin settings dir (`mappings.json`). The watcher keeps running when QAM is closed, so mapped buttons still fire.
+
+Saving a **number or color** mapping writes `~/.config/cecd/config.d/80-deck-cec-remote.toml`: the full factory `cecd` table with only those bound number/color keys omitted, so they stop typing. D-pad, OK, Back, play/pause, and the rest stay. SteamOS files (`00-` / `99-steamos-manager.toml`) are never touched. **Reset all** deletes our fragment and `mappings.json`, then reloads `cecd`.
 
 **Downloads** uses `Navigation.Navigate("/library/downloads")`. If that path is wrong on your Steam build, say so and we will change it.
 

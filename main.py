@@ -18,10 +18,13 @@ from cec_backend import (
     ACTIONS,
     RESERVED,
     action_for_code,
+    cecd_fragment_path,
     load_mappings,
+    restore_cecd_defaults,
     save_mappings,
     session_debug,
     session_env,
+    sync_cecd_uinput,
 )
 
 _DEBOUNCE_S = 0.35
@@ -35,6 +38,7 @@ class Plugin:
     _watch_error = ""
     _last_code: int | None = None
     _last_ts = 0.0
+    _pending: dict | None = None
 
     def _state(self):
         return {
@@ -42,11 +46,21 @@ class Plugin:
             "watch_ready": self._watch_ready,
             "watch_error": self._watch_error,
             "recording": self._recording,
+            "pending": self._pending,
             "mappings": load_mappings(),
             "reserved": [{"code": code, "name": name} for code, name in RESERVED.items()],
             "actions": list(ACTIONS),
+            "cecd_override": os.path.exists(cecd_fragment_path()),
             "debug": session_debug(),
         }
+
+    def _sync_uinput(self) -> None:
+        try:
+            result = sync_cecd_uinput(load_mappings())
+            if not result.get("reloaded"):
+                decky.logger.warning("cecd reload: %s", result.get("reload_error"))
+        except Exception as e:
+            decky.logger.error("sync cecd uinput: %s", e)
 
     async def ping(self):
         return {"ok": True, "debug": session_debug(), "watch_ready": self._watch_ready}
@@ -56,10 +70,12 @@ class Plugin:
 
     async def start_record(self):
         self._recording = True
+        self._pending = None
         return self._state()
 
     async def cancel_record(self):
         self._recording = False
+        self._pending = None
         return self._state()
 
     async def save_mapping(self, code: int, name: str, action: str):
@@ -75,6 +91,8 @@ class Plugin:
         mappings.append({"code": code_i, "name": name or f"0x{code_i:02X}", "action": action})
         save_mappings(mappings)
         self._recording = False
+        self._pending = None
+        await asyncio.get_running_loop().run_in_executor(None, self._sync_uinput)
         return self._state()
 
     async def delete_mapping(self, code: int):
@@ -83,6 +101,22 @@ class Plugin:
         except (TypeError, ValueError):
             return {**self._state(), "ok": False, "error": "invalid code"}
         save_mappings([m for m in load_mappings() if int(m["code"]) != code_i])
+        await asyncio.get_running_loop().run_in_executor(None, self._sync_uinput)
+        return self._state()
+
+    async def reset_all(self):
+        self._recording = False
+        self._pending = None
+        save_mappings([])
+
+        def _restore():
+            restore_cecd_defaults()
+            return sync_cecd_uinput([])
+
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, _restore)
+        except Exception as e:
+            return {**self._state(), "ok": False, "error": str(e)}
         return self._state()
 
     async def _handle_press(self, code: int, name: str):
@@ -101,6 +135,7 @@ class Plugin:
                 )
                 return
             self._recording = False
+            self._pending = {"code": code, "name": name, "action": "qam"}
             await decky.emit(
                 "cec_recorded",
                 {"ok": True, "reserved": False, "code": code, "name": name},

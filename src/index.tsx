@@ -1,6 +1,5 @@
 import {
   ButtonItem,
-  Dropdown,
   Navigation,
   PanelSection,
   PanelSectionRow,
@@ -13,7 +12,7 @@ import {
   removeEventListener,
   toaster,
 } from "@decky/api";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { FaTv } from "react-icons/fa";
 
 type Mapping = {
@@ -22,14 +21,22 @@ type Mapping = {
   action: string;
 };
 
+type Pending = {
+  code: number;
+  name: string;
+  action?: string;
+};
+
 type PluginState = {
   ok: boolean;
   watch_ready: boolean;
   watch_error: string;
   recording: boolean;
+  pending?: Pending | null;
   mappings: Mapping[];
   reserved: { code: number; name: string }[];
   actions: string[];
+  cecd_override?: boolean;
   error?: string;
 };
 
@@ -54,6 +61,7 @@ const saveMapping = callable<[code: number, name: string, action: string], Plugi
   "save_mapping"
 );
 const deleteMapping = callable<[code: number], PluginState>("delete_mapping");
+const resetAll = callable<[], PluginState>("reset_all");
 
 function runAction(action: string): void {
   switch (action) {
@@ -80,22 +88,34 @@ function actionLabel(action: string): string {
   return ACTION_LABELS[action] || action;
 }
 
+function pendingFromState(next: PluginState): Pending | null {
+  const p = next.pending;
+  if (p && typeof p.code === "number") {
+    return { code: p.code, name: p.name || `0x${p.code.toString(16)}`, action: p.action };
+  }
+  return null;
+}
+
 function Content() {
   const [state, setState] = useState<PluginState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [pending, setPending] = useState<Recorded | null>(null);
-  const [pickedAction, setPickedAction] = useState("qam");
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [resetArmed, setResetArmed] = useState(false);
+
+  const apply = useCallback((next: PluginState) => {
+    setState(next);
+    setError(next.error || "");
+    setPending(pendingFromState(next));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      const next = await getState();
-      setState(next);
-      setError(next.error || "");
+      apply(await getState());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [apply]);
 
   useEffect(() => {
     void refresh();
@@ -110,30 +130,17 @@ function Content() {
         });
         return;
       }
-      setPending(payload);
-      setPickedAction("qam");
       void refresh();
     };
     addEventListener("cec_recorded", onRecorded);
     return () => removeEventListener("cec_recorded", onRecorded);
   }, [refresh]);
 
-  const actionOptions = useMemo(
-    () =>
-      (state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS)).map((id) => ({
-        data: id,
-        label: actionLabel(id),
-      })),
-    [state]
-  );
-
   const onAdd = async () => {
     setBusy(true);
     setError("");
-    setPending(null);
     try {
-      const next = await startRecord();
-      setState(next);
+      apply(await startRecord());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -144,9 +151,7 @@ function Content() {
   const onCancel = async () => {
     setBusy(true);
     try {
-      const next = await cancelRecord();
-      setState(next);
-      setPending(null);
+      apply(await cancelRecord());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -154,14 +159,13 @@ function Content() {
     }
   };
 
-  const onSave = async () => {
+  const onPickAction = async (action: string) => {
     if (!pending) return;
     setBusy(true);
     try {
-      const next = await saveMapping(pending.code, pending.name, pickedAction);
-      setState(next);
+      const next = await saveMapping(pending.code, pending.name, action);
+      apply(next);
       if (!next.ok && next.error) setError(next.error);
-      else setPending(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -172,7 +176,24 @@ function Content() {
   const onDelete = async (code: number) => {
     setBusy(true);
     try {
-      setState(await deleteMapping(code));
+      apply(await deleteMapping(code));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onReset = async () => {
+    if (!resetArmed) {
+      setResetArmed(true);
+      return;
+    }
+    setBusy(true);
+    try {
+      apply(await resetAll());
+      setResetArmed(false);
+      toaster.toast({ title: "CEC Remote", body: "Mappings cleared, cecd defaults restored" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -182,6 +203,7 @@ function Content() {
 
   const mappings = state?.mappings || [];
   const recording = Boolean(state?.recording);
+  const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
 
   return (
     <>
@@ -189,7 +211,9 @@ function Content() {
         <PanelSectionRow>
           <div style={{ fontSize: "13px", opacity: 0.85, lineHeight: 1.35 }}>
             {state?.watch_ready
-              ? "Listening to SteamOS cecd"
+              ? state.cecd_override
+                ? "Listening to SteamOS cecd (plugin override active)"
+                : "Listening to SteamOS cecd"
               : state?.watch_error
                 ? `Watcher: ${state.watch_error}`
                 : "Starting CEC watcher…"}
@@ -220,22 +244,18 @@ function Content() {
         ) : pending ? (
           <>
             <PanelSectionRow>
-              <div style={{ fontSize: "13px" }}>
-                Recorded <b>{pending.name}</b> (0x{pending.code.toString(16).padStart(2, "0")})
+              <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+                Recorded <b>{pending.name}</b> (0x{pending.code.toString(16).padStart(2, "0")}).
+                Tap an action to save.
               </div>
             </PanelSectionRow>
-            <PanelSectionRow>
-              <Dropdown
-                rgOptions={actionOptions}
-                selectedOption={pickedAction}
-                onChange={(opt) => setPickedAction(String(opt.data))}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => void onSave()} disabled={busy}>
-                Save mapping
-              </ButtonItem>
-            </PanelSectionRow>
+            {actionIds.map((id) => (
+              <PanelSectionRow key={id}>
+                <ButtonItem layout="below" onClick={() => void onPickAction(id)} disabled={busy}>
+                  {actionLabel(id)}
+                </ButtonItem>
+              </PanelSectionRow>
+            ))}
             <PanelSectionRow>
               <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
                 Cancel
@@ -270,6 +290,24 @@ function Content() {
             </div>
           ))
         )}
+      </PanelSection>
+
+      <PanelSection title="Reset">
+        <PanelSectionRow>
+          <div style={{ fontSize: "12px", opacity: 0.8, lineHeight: 1.35 }}>
+            Clears plugin mappings and deletes our cecd fragment so SteamOS keyboard defaults come back.
+            SteamOS manager files are left alone.
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={() => void onReset()}
+            disabled={busy}
+          >
+            {resetArmed ? "Tap again to confirm reset" : "Reset all"}
+          </ButtonItem>
+        </PanelSectionRow>
       </PanelSection>
     </>
   );

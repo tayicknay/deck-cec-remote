@@ -96,6 +96,7 @@ const startRecord = callable("start_record");
 const cancelRecord = callable("cancel_record");
 const saveMapping = callable("save_mapping");
 const deleteMapping = callable("delete_mapping");
+const resetAll = callable("reset_all");
 function runAction(action) {
     switch (action) {
         case "qam":
@@ -117,22 +118,32 @@ function runAction(action) {
 function actionLabel(action) {
     return ACTION_LABELS[action] || action;
 }
+function pendingFromState(next) {
+    const p = next.pending;
+    if (p && typeof p.code === "number") {
+        return { code: p.code, name: p.name || `0x${p.code.toString(16)}`, action: p.action };
+    }
+    return null;
+}
 function Content() {
     const [state, setState] = SP_REACT.useState(null);
     const [busy, setBusy] = SP_REACT.useState(false);
     const [error, setError] = SP_REACT.useState("");
     const [pending, setPending] = SP_REACT.useState(null);
-    const [pickedAction, setPickedAction] = SP_REACT.useState("qam");
+    const [resetArmed, setResetArmed] = SP_REACT.useState(false);
+    const apply = SP_REACT.useCallback((next) => {
+        setState(next);
+        setError(next.error || "");
+        setPending(pendingFromState(next));
+    }, []);
     const refresh = SP_REACT.useCallback(async () => {
         try {
-            const next = await getState();
-            setState(next);
-            setError(next.error || "");
+            apply(await getState());
         }
         catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         }
-    }, []);
+    }, [apply]);
     SP_REACT.useEffect(() => {
         void refresh();
     }, [refresh]);
@@ -145,24 +156,16 @@ function Content() {
                 });
                 return;
             }
-            setPending(payload);
-            setPickedAction("qam");
             void refresh();
         };
         addEventListener("cec_recorded", onRecorded);
         return () => removeEventListener("cec_recorded", onRecorded);
     }, [refresh]);
-    const actionOptions = SP_REACT.useMemo(() => (state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS)).map((id) => ({
-        data: id,
-        label: actionLabel(id),
-    })), [state]);
     const onAdd = async () => {
         setBusy(true);
         setError("");
-        setPending(null);
         try {
-            const next = await startRecord();
-            setState(next);
+            apply(await startRecord());
         }
         catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -174,9 +177,7 @@ function Content() {
     const onCancel = async () => {
         setBusy(true);
         try {
-            const next = await cancelRecord();
-            setState(next);
-            setPending(null);
+            apply(await cancelRecord());
         }
         catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -185,17 +186,15 @@ function Content() {
             setBusy(false);
         }
     };
-    const onSave = async () => {
+    const onPickAction = async (action) => {
         if (!pending)
             return;
         setBusy(true);
         try {
-            const next = await saveMapping(pending.code, pending.name, pickedAction);
-            setState(next);
+            const next = await saveMapping(pending.code, pending.name, action);
+            apply(next);
             if (!next.ok && next.error)
                 setError(next.error);
-            else
-                setPending(null);
         }
         catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -207,7 +206,25 @@ function Content() {
     const onDelete = async (code) => {
         setBusy(true);
         try {
-            setState(await deleteMapping(code));
+            apply(await deleteMapping(code));
+        }
+        catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        }
+        finally {
+            setBusy(false);
+        }
+    };
+    const onReset = async () => {
+        if (!resetArmed) {
+            setResetArmed(true);
+            return;
+        }
+        setBusy(true);
+        try {
+            apply(await resetAll());
+            setResetArmed(false);
+            toaster.toast({ title: "CEC Remote", body: "Mappings cleared, cecd defaults restored" });
         }
         catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -218,11 +235,14 @@ function Content() {
     };
     const mappings = state?.mappings || [];
     const recording = Boolean(state?.recording);
+    const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
     return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Status", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", opacity: 0.85, lineHeight: 1.35 }, children: state?.watch_ready
-                                ? "Listening to SteamOS cecd"
+                                ? state.cecd_override
+                                    ? "Listening to SteamOS cecd (plugin override active)"
+                                    : "Listening to SteamOS cecd"
                                 : state?.watch_error
                                     ? `Watcher: ${state.watch_error}`
-                                    : "Starting CEC watcher…" }) }), error ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px" }, children: error }) })) : null] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [recording && !pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: "Press a TV remote button. D-pad, OK, Back, Play/Pause and skip keys are ignored \u2014 Steam already uses those." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px" }, children: ["Recorded ", SP_JSX.jsx("b", { children: pending.name }), " (0x", pending.code.toString(16).padStart(2, "0"), ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Dropdown, { rgOptions: actionOptions, selectedOption: pickedAction, onChange: (opt) => setPickedAction(String(opt.data)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onSave(), disabled: busy, children: "Save mapping" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) })), mappings.length === 0 && !recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsxs("div", { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.35 }, children: [SP_JSX.jsx("b", { children: m.name }), " \u2192 ", actionLabel(m.action)] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: ["Remove ", m.name] }) })] }, m.code))))] })] }));
+                                    : "Starting CEC watcher…" }) }), error ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px" }, children: error }) })) : null] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [recording && !pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: "Press a TV remote button. D-pad, OK, Back, Play/Pause and skip keys are ignored \u2014 Steam already uses those." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: ["Recorded ", SP_JSX.jsx("b", { children: pending.name }), " (0x", pending.code.toString(16).padStart(2, "0"), "). Tap an action to save."] }) }), actionIds.map((id) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickAction(id), disabled: busy, children: actionLabel(id) }) }, id))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) })), mappings.length === 0 && !recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsxs("div", { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.35 }, children: [SP_JSX.jsx("b", { children: m.name }), " \u2192 ", actionLabel(m.action)] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: ["Remove ", m.name] }) })] }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Reset", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: 0.8, lineHeight: 1.35 }, children: "Clears plugin mappings and deletes our cecd fragment so SteamOS keyboard defaults come back. SteamOS manager files are left alone." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
 }
 var index = definePlugin(() => {
     addEventListener("cec_action", (action) => {
