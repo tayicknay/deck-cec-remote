@@ -57,7 +57,9 @@ download_zip() {
         2>/dev/null || true
     )"
     [[ -n "$run_id" && "$run_id" != "null" ]] || die "no successful Plugin ZIP CI run / release for $REPO"
-    gh run download "$run_id" --repo "$REPO" -n "cec-remote-zip" -D "$tmp"
+    if ! gh run download "$run_id" --repo "$REPO" -n "cec-remote.zip" -D "$tmp" 2>/dev/null; then
+      gh run download "$run_id" --repo "$REPO" -n "cec-remote-zip" -D "$tmp"
+    fi
     echo "Downloaded from Actions run $run_id"
   fi
 

@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -39,11 +39,13 @@ jobs:
       - name: Package ZIP
         run: ./scripts/package-zip.sh "$GITHUB_WORKSPACE/cec-remote.zip"
 
+      # archive: false = upload the Decky zip as-is (no zip-in-zip).
+      # Hidden paths like .pack are skipped by default; do not use those.
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
-          name: cec-remote-zip
           path: cec-remote.zip
+          archive: false
           if-no-files-found: error
 
       - name: Attach to GitHub Release (published release or version tag)
