@@ -95,7 +95,6 @@ const startRecord = callable("start_record");
 const cancelRecord = callable("cancel_record");
 const saveMapping = callable("save_mapping");
 const deleteMapping = callable("delete_mapping");
-const setPendingAction = callable("set_pending_action");
 const setOverrideSteamButtons = callable("set_override_steam_buttons");
 const resetAll = callable("reset_all");
 function navTreeVisible(match) {
@@ -162,10 +161,15 @@ function pendingFromState(next) {
         return {
             code: p.code,
             name: p.name || `0x${p.code.toString(16)}`,
-            action: p.action || "qam",
+            action: p.action,
         };
     }
     return null;
+}
+function ErrorRows({ error }) {
+    if (!error)
+        return null;
+    return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px", lineHeight: 1.35 }, children: error }) }));
 }
 function Content() {
     const [state, setState] = SP_REACT.useState(null);
@@ -175,16 +179,11 @@ function Content() {
     const [reservedHint, setReservedHint] = SP_REACT.useState("");
     const [resetArmed, setResetArmed] = SP_REACT.useState(false);
     const reservedShown = SP_REACT.useRef(false);
-    const pickTimers = SP_REACT.useRef([]);
-    const afterMenuClose = SP_REACT.useCallback((fn) => {
-        const id = window.setTimeout(fn, 80);
-        pickTimers.current.push(id);
-    }, []);
     const apply = SP_REACT.useCallback((next) => {
         setState(next);
         setError(next.error || "");
         setPending(pendingFromState(next));
-        if (!next.recording) {
+        if (!next.recording && !next.pending) {
             reservedShown.current = false;
             setReservedHint("");
         }
@@ -199,11 +198,6 @@ function Content() {
     }, [apply]);
     SP_REACT.useEffect(() => {
         void refresh();
-        return () => {
-            for (const id of pickTimers.current)
-                window.clearTimeout(id);
-            pickTimers.current = [];
-        };
     }, [refresh]);
     SP_REACT.useEffect(() => {
         const onRecorded = (payload) => {
@@ -214,6 +208,8 @@ function Content() {
                 }
                 return;
             }
+            reservedShown.current = false;
+            setReservedHint("");
             void refresh();
         };
         addEventListener("cec_recorded", onRecorded);
@@ -246,19 +242,12 @@ function Content() {
             setBusy(false);
         }
     };
-    const onActionChange = (action) => {
-        afterMenuClose(() => {
-            void setPendingAction(action)
-                .then(apply)
-                .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-        });
-    };
-    const onSave = async () => {
+    const onPickAction = async (action) => {
         if (!pending)
             return;
         setBusy(true);
         try {
-            const next = await saveMapping(pending.code, pending.name, pending.action || "qam");
+            const next = await saveMapping(pending.code, pending.name, action);
             apply(next);
             if (!next.ok && next.error)
                 setError(next.error);
@@ -314,15 +303,18 @@ function Content() {
     const mappings = state?.mappings || [];
     const recording = Boolean(state?.recording);
     const override = Boolean(state?.override_steam_buttons);
-    const actionOptions = SP_REACT.useMemo(() => (state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS)).map((id) => ({
-        data: id,
-        label: actionLabel(id),
-    })), [state]);
-    const watchError = !state?.watch_ready && (state?.watch_error || error);
-    const showStatus = Boolean(recording || pending || watchError || error);
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [showStatus ? (SP_JSX.jsxs(DFL.PanelSection, { title: recording || pending ? "Recording" : "Status", children: [watchError ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px", lineHeight: 1.35 }, children: state?.watch_error || error }) })) : error ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px" }, children: error }) })) : null, recording && !pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: override
-                                        ? "Press a TV remote button."
-                                        : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons." }) }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: ["Recorded ", SP_JSX.jsx("b", { children: pending.name })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Dropdown, { rgOptions: actionOptions, selectedOption: pending.action || "qam", menuLabel: "Action", onChange: (opt) => onActionChange(String(opt.data)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onSave(), disabled: busy, children: "Save mapping" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : null] })) : null, SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [!recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) })) : null, mappings.length === 0 && !recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m.action)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
+    const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
+    const watchError = !state?.watch_ready ? state?.watch_error || error : error;
+    const screen = pending ? "pick" : recording ? "record" : "home";
+    if (screen === "record") {
+        return (SP_JSX.jsxs(DFL.PanelSection, { title: "Record button", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: override
+                            ? "Press a TV remote button."
+                            : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons." }) }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] }));
+    }
+    if (screen === "pick") {
+        return (SP_JSX.jsxs(DFL.PanelSection, { title: "Choose action", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: ["Last button: ", SP_JSX.jsx("b", { children: pending?.name })] }) }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, actionIds.map((id) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickAction(id), disabled: busy, children: actionLabel(id) }) }, id))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] }));
+    }
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) }), mappings.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m.action)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
 }
 var index = definePlugin(() => {
     addEventListener("cec_action", (action) => {

@@ -153,8 +153,7 @@ class Plugin:
                     {"ok": False, "reserved": True, "code": code, "name": name},
                 )
                 return
-            self._recording = False
-            self._pending = {"code": code, "name": name, "action": "qam"}
+            self._pending = {"code": code, "name": name}
             await decky.emit(
                 "cec_recorded",
                 {"ok": True, "reserved": False, "code": code, "name": name},

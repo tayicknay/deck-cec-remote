@@ -1,6 +1,5 @@
 import {
   ButtonItem,
-  Dropdown,
   Navigation,
   PanelSection,
   PanelSectionRow,
@@ -14,7 +13,7 @@ import {
   definePlugin,
   removeEventListener,
 } from "@decky/api";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FaTv } from "react-icons/fa";
 
 type Mapping = {
@@ -64,7 +63,6 @@ const saveMapping = callable<[code: number, name: string, action: string], Plugi
   "save_mapping"
 );
 const deleteMapping = callable<[code: number], PluginState>("delete_mapping");
-const setPendingAction = callable<[action: string], PluginState>("set_pending_action");
 const setOverrideSteamButtons = callable<[enabled: boolean], PluginState>(
   "set_override_steam_buttons"
 );
@@ -133,10 +131,19 @@ function pendingFromState(next: PluginState): Pending | null {
     return {
       code: p.code,
       name: p.name || `0x${p.code.toString(16)}`,
-      action: p.action || "qam",
+      action: p.action,
     };
   }
   return null;
+}
+
+function ErrorRows({ error }: { error: string }) {
+  if (!error) return null;
+  return (
+    <PanelSectionRow>
+      <div style={{ color: "#f88", fontSize: "12px", lineHeight: 1.35 }}>{error}</div>
+    </PanelSectionRow>
+  );
 }
 
 function Content() {
@@ -147,18 +154,12 @@ function Content() {
   const [reservedHint, setReservedHint] = useState("");
   const [resetArmed, setResetArmed] = useState(false);
   const reservedShown = useRef(false);
-  const pickTimers = useRef<number[]>([]);
-
-  const afterMenuClose = useCallback((fn: () => void) => {
-    const id = window.setTimeout(fn, 80);
-    pickTimers.current.push(id);
-  }, []);
 
   const apply = useCallback((next: PluginState) => {
     setState(next);
     setError(next.error || "");
     setPending(pendingFromState(next));
-    if (!next.recording) {
+    if (!next.recording && !next.pending) {
       reservedShown.current = false;
       setReservedHint("");
     }
@@ -174,10 +175,6 @@ function Content() {
 
   useEffect(() => {
     void refresh();
-    return () => {
-      for (const id of pickTimers.current) window.clearTimeout(id);
-      pickTimers.current = [];
-    };
   }, [refresh]);
 
   useEffect(() => {
@@ -191,6 +188,8 @@ function Content() {
         }
         return;
       }
+      reservedShown.current = false;
+      setReservedHint("");
       void refresh();
     };
     addEventListener("cec_recorded", onRecorded);
@@ -222,19 +221,11 @@ function Content() {
     }
   };
 
-  const onActionChange = (action: string) => {
-    afterMenuClose(() => {
-      void setPendingAction(action)
-        .then(apply)
-        .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-    });
-  };
-
-  const onSave = async () => {
+  const onPickAction = async (action: string) => {
     if (!pending) return;
     setBusy(true);
     try {
-      const next = await saveMapping(pending.code, pending.name, pending.action || "qam");
+      const next = await saveMapping(pending.code, pending.name, action);
       apply(next);
       if (!next.ok && next.error) setError(next.error);
     } catch (e) {
@@ -285,92 +276,75 @@ function Content() {
   const mappings = state?.mappings || [];
   const recording = Boolean(state?.recording);
   const override = Boolean(state?.override_steam_buttons);
-  const actionOptions = useMemo(
-    () =>
-      (state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS)).map((id) => ({
-        data: id,
-        label: actionLabel(id),
-      })),
-    [state]
-  );
-  const watchError = !state?.watch_ready && (state?.watch_error || error);
-  const showStatus = Boolean(recording || pending || watchError || error);
+  const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
+  const watchError = !state?.watch_ready ? state?.watch_error || error : error;
+  const screen = pending ? "pick" : recording ? "record" : "home";
+
+  if (screen === "record") {
+    return (
+      <PanelSection title="Record button">
+        <ErrorRows error={watchError} />
+        <PanelSectionRow>
+          <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+            {override
+              ? "Press a TV remote button."
+              : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons."}
+          </div>
+        </PanelSectionRow>
+        {reservedHint ? (
+          <PanelSectionRow>
+            <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
+          </PanelSectionRow>
+        ) : null}
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
+            Cancel
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
+
+  if (screen === "pick") {
+    return (
+      <PanelSection title="Choose action">
+        <ErrorRows error={watchError} />
+        <PanelSectionRow>
+          <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+            Last button: <b>{pending?.name}</b>
+          </div>
+        </PanelSectionRow>
+        {reservedHint ? (
+          <PanelSectionRow>
+            <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
+          </PanelSectionRow>
+        ) : null}
+        {actionIds.map((id) => (
+          <PanelSectionRow key={id}>
+            <ButtonItem layout="below" onClick={() => void onPickAction(id)} disabled={busy}>
+              {actionLabel(id)}
+            </ButtonItem>
+          </PanelSectionRow>
+        ))}
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
+            Cancel
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
 
   return (
     <>
-      {showStatus ? (
-        <PanelSection title={recording || pending ? "Recording" : "Status"}>
-          {watchError ? (
-            <PanelSectionRow>
-              <div style={{ color: "#f88", fontSize: "12px", lineHeight: 1.35 }}>
-                {state?.watch_error || error}
-              </div>
-            </PanelSectionRow>
-          ) : error ? (
-            <PanelSectionRow>
-              <div style={{ color: "#f88", fontSize: "12px" }}>{error}</div>
-            </PanelSectionRow>
-          ) : null}
-          {recording && !pending ? (
-            <>
-              <PanelSectionRow>
-                <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
-                  {override
-                    ? "Press a TV remote button."
-                    : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons."}
-                </div>
-              </PanelSectionRow>
-              {reservedHint ? (
-                <PanelSectionRow>
-                  <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
-                </PanelSectionRow>
-              ) : null}
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
-                  Cancel
-                </ButtonItem>
-              </PanelSectionRow>
-            </>
-          ) : pending ? (
-            <>
-              <PanelSectionRow>
-                <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
-                  Recorded <b>{pending.name}</b>
-                </div>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <Dropdown
-                  rgOptions={actionOptions}
-                  selectedOption={pending.action || "qam"}
-                  menuLabel="Action"
-                  onChange={(opt) => onActionChange(String(opt.data))}
-                />
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => void onSave()} disabled={busy}>
-                  Save mapping
-                </ButtonItem>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
-                  Cancel
-                </ButtonItem>
-              </PanelSectionRow>
-            </>
-          ) : null}
-        </PanelSection>
-      ) : null}
-
       <PanelSection title="Mappings">
-        {!recording && !pending ? (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => void onAdd()} disabled={busy || !state?.watch_ready}>
-              Add mapping
-            </ButtonItem>
-          </PanelSectionRow>
-        ) : null}
-
-        {mappings.length === 0 && !recording && !pending ? (
+        <ErrorRows error={watchError} />
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => void onAdd()} disabled={busy || !state?.watch_ready}>
+            Add mapping
+          </ButtonItem>
+        </PanelSectionRow>
+        {mappings.length === 0 ? (
           <PanelSectionRow>
             <div style={{ opacity: 0.7, fontSize: "13px" }}>No mappings yet</div>
           </PanelSectionRow>
@@ -389,7 +363,6 @@ function Content() {
           ))
         )}
       </PanelSection>
-
       <PanelSection title="Settings">
         <PanelSectionRow>
           <ToggleField
