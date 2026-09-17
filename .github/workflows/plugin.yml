@@ -39,13 +39,11 @@ jobs:
       - name: Package ZIP
         run: ./scripts/package-zip.sh "$GITHUB_WORKSPACE/cec-remote.zip"
 
-      # Upload the folder, not the .zip. GitHub always wraps artifacts in a zip,
-      # so this download is already Decky-installable (cec-remote/… at the root).
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: cec-remote
-          path: .pack
+          name: cec-remote-zip
+          path: cec-remote.zip
           if-no-files-found: error
 
       - name: Attach to GitHub Release (published release or version tag)

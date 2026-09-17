@@ -28,7 +28,7 @@ Needs [Decky Loader](https://decky.xyz).
 
 ### Option A — ZIP from Actions / Releases
 
-Every push to `main` builds a Decky ZIP. The Actions artifact is named **`cec-remote`** — download that file and install it as-is (GitHub already wrapped the plugin folder). Releases attach `cec-remote.zip` the same way.
+Every push to `main` builds **`cec-remote.zip`**.
 
 - Decky → gear → Developer → **Install from ZIP**, or
 - On the Deck (with `gh` logged in):

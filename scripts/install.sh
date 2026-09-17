@@ -57,30 +57,21 @@ download_zip() {
         2>/dev/null || true
     )"
     [[ -n "$run_id" && "$run_id" != "null" ]] || die "no successful Plugin ZIP CI run / release for $REPO"
-    if ! gh run download "$run_id" --repo "$REPO" -n "cec-remote" -D "$tmp" 2>/dev/null; then
-      gh run download "$run_id" --repo "$REPO" -n "cec-remote-zip" -D "$tmp"
-    fi
+    gh run download "$run_id" --repo "$REPO" -n "cec-remote-zip" -D "$tmp"
     echo "Downloaded from Actions run $run_id"
   fi
 
+  local found
+  found="$(find "$tmp" -name 'cec-remote.zip' -type f | head -n1 || true)"
+  [[ -n "$found" ]] || die "no cec-remote.zip in download"
+  cp -f "$found" "$zip"
+
   rm -rf "$cache/unpack"
   mkdir -p "$cache/unpack"
-
-  if [[ -f "$tmp/$PLUGIN_DIR_NAME/main.py" ]]; then
-    cp -a "$tmp/$PLUGIN_DIR_NAME" "$cache/unpack/"
-  elif [[ -f "$tmp/main.py" ]]; then
-    mkdir -p "$cache/unpack/$PLUGIN_DIR_NAME"
-    cp -a "$tmp/." "$cache/unpack/$PLUGIN_DIR_NAME/"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -qo "$zip" -d "$cache/unpack"
   else
-    local found
-    found="$(find "$tmp" -name 'cec-remote.zip' -type f | head -n1 || true)"
-    [[ -n "$found" ]] || die "no cec-remote plugin in download"
-    cp -f "$found" "$zip"
-    if command -v unzip >/dev/null 2>&1; then
-      unzip -qo "$zip" -d "$cache/unpack"
-    else
-      python3 -c "import zipfile; zipfile.ZipFile('$zip').extractall('$cache/unpack')"
-    fi
+    python3 -c "import zipfile; zipfile.ZipFile('$zip').extractall('$cache/unpack')"
   fi
   rm -rf "$tmp"
 
