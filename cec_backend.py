@@ -83,17 +83,49 @@ def settings_path() -> str:
     return os.path.join(root, "mappings.json")
 
 
-def load_mappings() -> list[dict[str, Any]]:
+def default_settings() -> dict[str, Any]:
+    return {"override_steam_buttons": False, "mappings": []}
+
+
+def load_settings() -> dict[str, Any]:
     path = settings_path()
+    data: Any
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return []
-    raw = data.get("mappings") if isinstance(data, dict) else data
+        return default_settings()
+    if isinstance(data, list):
+        return {"override_steam_buttons": False, "mappings": _clean_mappings(data, True)}
+    if not isinstance(data, dict):
+        return default_settings()
+    override = bool(data.get("override_steam_buttons"))
+    return {
+        "override_steam_buttons": override,
+        "mappings": _clean_mappings(data.get("mappings"), override),
+    }
+
+
+def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    override = bool(settings.get("override_steam_buttons"))
+    out = {
+        "override_steam_buttons": override,
+        "mappings": _clean_mappings(settings.get("mappings"), override),
+    }
+    path = settings_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    return out
+
+
+def _clean_mappings(raw: Any, override: bool) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     out: list[dict[str, Any]] = []
+    seen: set[int] = set()
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -101,11 +133,14 @@ def load_mappings() -> list[dict[str, Any]]:
             code = int(item["code"])
         except (KeyError, TypeError, ValueError):
             continue
+        if code in seen:
+            continue
+        if code in RESERVED and not override:
+            continue
         action = str(item.get("action") or "")
         if action not in ACTIONS:
             continue
-        if code in RESERVED:
-            continue
+        seen.add(code)
         out.append(
             {
                 "code": code,
@@ -116,42 +151,27 @@ def load_mappings() -> list[dict[str, Any]]:
     return out
 
 
+def load_mappings() -> list[dict[str, Any]]:
+    return load_settings()["mappings"]
+
+
 def save_mappings(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    path = settings_path()
-    normalized: list[dict[str, Any]] = []
-    seen: set[int] = set()
-    for item in mappings:
-        if not isinstance(item, dict):
-            continue
-        try:
-            code = int(item["code"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if code in seen or code in RESERVED:
-            continue
-        action = str(item.get("action") or "")
-        if action not in ACTIONS:
-            continue
-        seen.add(code)
-        normalized.append(
-            {
-                "code": code,
-                "name": str(item.get("name") or f"0x{code:02X}"),
-                "action": action,
-            }
-        )
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"mappings": normalized}, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-    return normalized
+    settings = load_settings()
+    settings["mappings"] = mappings
+    return save_settings(settings)["mappings"]
+
+
+def set_override_steam_buttons(enabled: bool) -> dict[str, Any]:
+    settings = load_settings()
+    settings["override_steam_buttons"] = bool(enabled)
+    return save_settings(settings)
 
 
 def action_for_code(code: int, mappings: list[dict[str, Any]] | None = None) -> str:
-    if code in RESERVED:
+    settings = load_settings()
+    if code in RESERVED and not settings.get("override_steam_buttons"):
         return ""
-    for item in mappings if mappings is not None else load_mappings():
+    for item in mappings if mappings is not None else settings["mappings"]:
         if int(item["code"]) == code:
             return str(item["action"])
     return ""
@@ -247,14 +267,18 @@ FRAGMENT_NAME = "80-deck-cec-remote.toml"
 
 
 def uinput_stolen(mappings: list[dict[str, Any]] | None = None) -> set[int]:
-    items = mappings if mappings is not None else load_mappings()
+    settings = load_settings()
+    items = mappings if mappings is not None else settings["mappings"]
+    override = bool(settings.get("override_steam_buttons"))
     stolen: set[int] = set()
     for item in items:
         try:
             code = int(item["code"])
         except (KeyError, TypeError, ValueError):
             continue
-        if code in WIPEABLE_CODES:
+        if code in NUMBER_CODES or code in COLOR_CODES:
+            stolen.add(code)
+        elif override and code in RESERVED:
             stolen.add(code)
     return stolen
 

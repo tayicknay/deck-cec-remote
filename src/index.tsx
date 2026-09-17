@@ -1,8 +1,11 @@
 import {
   ButtonItem,
+  Dropdown,
   Navigation,
   PanelSection,
   PanelSectionRow,
+  ToggleField,
+  getGamepadNavigationTrees,
   staticClasses,
 } from "@decky/ui";
 import {
@@ -10,9 +13,8 @@ import {
   callable,
   definePlugin,
   removeEventListener,
-  toaster,
 } from "@decky/api";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FaTv } from "react-icons/fa";
 
 type Mapping = {
@@ -34,6 +36,7 @@ type PluginState = {
   recording: boolean;
   pending?: Pending | null;
   mappings: Mapping[];
+  override_steam_buttons?: boolean;
   reserved: { code: number; name: string }[];
   actions: string[];
   cecd_override?: boolean;
@@ -61,15 +64,51 @@ const saveMapping = callable<[code: number, name: string, action: string], Plugi
   "save_mapping"
 );
 const deleteMapping = callable<[code: number], PluginState>("delete_mapping");
+const setPendingAction = callable<[action: string], PluginState>("set_pending_action");
+const setOverrideSteamButtons = callable<[enabled: boolean], PluginState>(
+  "set_override_steam_buttons"
+);
 const resetAll = callable<[], PluginState>("reset_all");
+
+function navTreeVisible(match: (id: string) => boolean): boolean {
+  try {
+    const trees = getGamepadNavigationTrees() || [];
+    return trees.some((tree: { id?: string; m_ID?: string; m_Root?: any; Root?: any }) => {
+      const id = String(tree?.id || tree?.m_ID || "");
+      if (!match(id)) return false;
+      const win =
+        tree?.m_Root?.m_element?.ownerDocument?.defaultView ||
+        tree?.Root?.Element?.ownerDocument?.defaultView;
+      if (!win) return true;
+      return !win.document.hidden;
+    });
+  } catch {
+    return false;
+  }
+}
+
+function isQamOpen(): boolean {
+  return navTreeVisible((id) => id === "QuickAccess-NA" || id.toLowerCase().includes("quickaccess"));
+}
+
+function isSteamMenuOpen(): boolean {
+  if (isQamOpen()) return false;
+  return navTreeVisible((id) => {
+    const lower = id.toLowerCase();
+    if (lower.includes("quickaccess")) return false;
+    return lower.includes("mainmenu") || lower.includes("mainnav") || lower === "menu-na";
+  });
+}
 
 function runAction(action: string): void {
   switch (action) {
     case "qam":
-      Navigation.OpenQuickAccessMenu();
+      if (isQamOpen()) Navigation.CloseSideMenus();
+      else Navigation.OpenQuickAccessMenu();
       break;
     case "steam_menu":
-      Navigation.OpenMainMenu();
+      if (isSteamMenuOpen()) Navigation.CloseSideMenus();
+      else Navigation.OpenMainMenu();
       break;
     case "library":
       Navigation.CloseSideMenus();
@@ -91,7 +130,11 @@ function actionLabel(action: string): string {
 function pendingFromState(next: PluginState): Pending | null {
   const p = next.pending;
   if (p && typeof p.code === "number") {
-    return { code: p.code, name: p.name || `0x${p.code.toString(16)}`, action: p.action };
+    return {
+      code: p.code,
+      name: p.name || `0x${p.code.toString(16)}`,
+      action: p.action || "qam",
+    };
   }
   return null;
 }
@@ -101,12 +144,24 @@ function Content() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
+  const [reservedHint, setReservedHint] = useState("");
   const [resetArmed, setResetArmed] = useState(false);
+  const reservedShown = useRef(false);
+  const pickTimers = useRef<number[]>([]);
+
+  const afterMenuClose = useCallback((fn: () => void) => {
+    const id = window.setTimeout(fn, 80);
+    pickTimers.current.push(id);
+  }, []);
 
   const apply = useCallback((next: PluginState) => {
     setState(next);
     setError(next.error || "");
     setPending(pendingFromState(next));
+    if (!next.recording) {
+      reservedShown.current = false;
+      setReservedHint("");
+    }
   }, []);
 
   const refresh = useCallback(async () => {
@@ -119,15 +174,21 @@ function Content() {
 
   useEffect(() => {
     void refresh();
+    return () => {
+      for (const id of pickTimers.current) window.clearTimeout(id);
+      pickTimers.current = [];
+    };
   }, [refresh]);
 
   useEffect(() => {
     const onRecorded = (payload: Recorded) => {
       if (payload.reserved) {
-        toaster.toast({
-          title: "CEC Remote",
-          body: `${payload.name} is already used by Steam`,
-        });
+        if (!reservedShown.current) {
+          reservedShown.current = true;
+          setReservedHint(
+            `${payload.name} is used by Steam. Turn on Override Steam buttons to map it.`
+          );
+        }
         return;
       }
       void refresh();
@@ -139,6 +200,8 @@ function Content() {
   const onAdd = async () => {
     setBusy(true);
     setError("");
+    reservedShown.current = false;
+    setReservedHint("");
     try {
       apply(await startRecord());
     } catch (e) {
@@ -159,11 +222,19 @@ function Content() {
     }
   };
 
-  const onPickAction = async (action: string) => {
+  const onActionChange = (action: string) => {
+    afterMenuClose(() => {
+      void setPendingAction(action)
+        .then(apply)
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    });
+  };
+
+  const onSave = async () => {
     if (!pending) return;
     setBusy(true);
     try {
-      const next = await saveMapping(pending.code, pending.name, action);
+      const next = await saveMapping(pending.code, pending.name, pending.action || "qam");
       apply(next);
       if (!next.ok && next.error) setError(next.error);
     } catch (e) {
@@ -184,6 +255,17 @@ function Content() {
     }
   };
 
+  const onOverride = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      apply(await setOverrideSteamButtons(enabled));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onReset = async () => {
     if (!resetArmed) {
       setResetArmed(true);
@@ -193,7 +275,6 @@ function Content() {
     try {
       apply(await resetAll());
       setResetArmed(false);
-      toaster.toast({ title: "CEC Remote", body: "Mappings cleared, cecd defaults restored" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -203,72 +284,91 @@ function Content() {
 
   const mappings = state?.mappings || [];
   const recording = Boolean(state?.recording);
-  const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
+  const override = Boolean(state?.override_steam_buttons);
+  const actionOptions = useMemo(
+    () =>
+      (state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS)).map((id) => ({
+        data: id,
+        label: actionLabel(id),
+      })),
+    [state]
+  );
+  const watchError = !state?.watch_ready && (state?.watch_error || error);
+  const showStatus = Boolean(recording || pending || watchError || error);
 
   return (
     <>
-      <PanelSection title="Status">
-        <PanelSectionRow>
-          <div style={{ fontSize: "13px", opacity: 0.85, lineHeight: 1.35 }}>
-            {state?.watch_ready
-              ? state.cecd_override
-                ? "Listening to SteamOS cecd (plugin override active)"
-                : "Listening to SteamOS cecd"
-              : state?.watch_error
-                ? `Watcher: ${state.watch_error}`
-                : "Starting CEC watcher…"}
-          </div>
-        </PanelSectionRow>
-        {error ? (
-          <PanelSectionRow>
-            <div style={{ color: "#f88", fontSize: "12px" }}>{error}</div>
-          </PanelSectionRow>
-        ) : null}
-      </PanelSection>
-
-      <PanelSection title="Mappings">
-        {recording && !pending ? (
-          <>
+      {showStatus ? (
+        <PanelSection title={recording || pending ? "Recording" : "Status"}>
+          {watchError ? (
             <PanelSectionRow>
-              <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
-                Press a TV remote button. D-pad, OK, Back, Play/Pause and skip keys are ignored —
-                Steam already uses those.
+              <div style={{ color: "#f88", fontSize: "12px", lineHeight: 1.35 }}>
+                {state?.watch_error || error}
               </div>
             </PanelSectionRow>
+          ) : error ? (
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
-                Cancel
-              </ButtonItem>
+              <div style={{ color: "#f88", fontSize: "12px" }}>{error}</div>
             </PanelSectionRow>
-          </>
-        ) : pending ? (
-          <>
-            <PanelSectionRow>
-              <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
-                Recorded <b>{pending.name}</b> (0x{pending.code.toString(16).padStart(2, "0")}).
-                Tap an action to save.
-              </div>
-            </PanelSectionRow>
-            {actionIds.map((id) => (
-              <PanelSectionRow key={id}>
-                <ButtonItem layout="below" onClick={() => void onPickAction(id)} disabled={busy}>
-                  {actionLabel(id)}
+          ) : null}
+          {recording && !pending ? (
+            <>
+              <PanelSectionRow>
+                <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+                  {override
+                    ? "Press a TV remote button."
+                    : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons."}
+                </div>
+              </PanelSectionRow>
+              {reservedHint ? (
+                <PanelSectionRow>
+                  <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
+                </PanelSectionRow>
+              ) : null}
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
+                  Cancel
                 </ButtonItem>
               </PanelSectionRow>
-            ))}
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
-                Cancel
-              </ButtonItem>
-            </PanelSectionRow>
-          </>
-        ) : (
+            </>
+          ) : pending ? (
+            <>
+              <PanelSectionRow>
+                <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+                  Recorded <b>{pending.name}</b>
+                </div>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <Dropdown
+                  rgOptions={actionOptions}
+                  selectedOption={pending.action || "qam"}
+                  menuLabel="Action"
+                  onChange={(opt) => onActionChange(String(opt.data))}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => void onSave()} disabled={busy}>
+                  Save mapping
+                </ButtonItem>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
+                  Cancel
+                </ButtonItem>
+              </PanelSectionRow>
+            </>
+          ) : null}
+        </PanelSection>
+      ) : null}
+
+      <PanelSection title="Mappings">
+        {!recording && !pending ? (
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={() => void onAdd()} disabled={busy || !state?.watch_ready}>
               Add mapping
             </ButtonItem>
           </PanelSectionRow>
-        )}
+        ) : null}
 
         {mappings.length === 0 && !recording && !pending ? (
           <PanelSectionRow>
@@ -276,35 +376,32 @@ function Content() {
           </PanelSectionRow>
         ) : (
           mappings.map((m) => (
-            <div key={m.code}>
-              <PanelSectionRow>
-                <div style={{ fontSize: "13px", lineHeight: 1.35 }}>
-                  <b>{m.name}</b> → {actionLabel(m.action)}
-                </div>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => void onDelete(m.code)} disabled={busy}>
-                  Remove {m.name}
-                </ButtonItem>
-              </PanelSectionRow>
-            </div>
+            <PanelSectionRow key={m.code}>
+              <ButtonItem
+                label={`${m.name} → ${actionLabel(m.action)}`}
+                layout="below"
+                onClick={() => void onDelete(m.code)}
+                disabled={busy}
+              >
+                Remove
+              </ButtonItem>
+            </PanelSectionRow>
           ))
         )}
       </PanelSection>
 
-      <PanelSection title="Reset">
+      <PanelSection title="Settings">
         <PanelSectionRow>
-          <div style={{ fontSize: "12px", opacity: 0.8, lineHeight: 1.35 }}>
-            Clears plugin mappings and deletes our cecd fragment so SteamOS keyboard defaults come back.
-            SteamOS manager files are left alone.
-          </div>
+          <ToggleField
+            label="Override Steam buttons"
+            description="Allow mapping d-pad, Back, Play, and other keys Steam already uses."
+            checked={override}
+            disabled={busy}
+            onChange={(v) => void onOverride(v)}
+          />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => void onReset()}
-            disabled={busy}
-          >
+          <ButtonItem layout="below" onClick={() => void onReset()} disabled={busy}>
             {resetArmed ? "Tap again to confirm reset" : "Reset all"}
           </ButtonItem>
         </PanelSectionRow>

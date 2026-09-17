@@ -18,7 +18,6 @@ if (api._version != API_VERSION) {
 const callable = api.callable;
 const addEventListener = api.addEventListener;
 const removeEventListener = api.removeEventListener;
-const toaster = api.toaster;
 const definePlugin = (fn) => {
     return (...args) => {
         return fn(...args);
@@ -96,14 +95,53 @@ const startRecord = callable("start_record");
 const cancelRecord = callable("cancel_record");
 const saveMapping = callable("save_mapping");
 const deleteMapping = callable("delete_mapping");
+const setPendingAction = callable("set_pending_action");
+const setOverrideSteamButtons = callable("set_override_steam_buttons");
 const resetAll = callable("reset_all");
+function navTreeVisible(match) {
+    try {
+        const trees = DFL.getGamepadNavigationTrees() || [];
+        return trees.some((tree) => {
+            const id = String(tree?.id || tree?.m_ID || "");
+            if (!match(id))
+                return false;
+            const win = tree?.m_Root?.m_element?.ownerDocument?.defaultView ||
+                tree?.Root?.Element?.ownerDocument?.defaultView;
+            if (!win)
+                return true;
+            return !win.document.hidden;
+        });
+    }
+    catch {
+        return false;
+    }
+}
+function isQamOpen() {
+    return navTreeVisible((id) => id === "QuickAccess-NA" || id.toLowerCase().includes("quickaccess"));
+}
+function isSteamMenuOpen() {
+    if (isQamOpen())
+        return false;
+    return navTreeVisible((id) => {
+        const lower = id.toLowerCase();
+        if (lower.includes("quickaccess"))
+            return false;
+        return lower.includes("mainmenu") || lower.includes("mainnav") || lower === "menu-na";
+    });
+}
 function runAction(action) {
     switch (action) {
         case "qam":
-            DFL.Navigation.OpenQuickAccessMenu();
+            if (isQamOpen())
+                DFL.Navigation.CloseSideMenus();
+            else
+                DFL.Navigation.OpenQuickAccessMenu();
             break;
         case "steam_menu":
-            DFL.Navigation.OpenMainMenu();
+            if (isSteamMenuOpen())
+                DFL.Navigation.CloseSideMenus();
+            else
+                DFL.Navigation.OpenMainMenu();
             break;
         case "library":
             DFL.Navigation.CloseSideMenus();
@@ -121,7 +159,11 @@ function actionLabel(action) {
 function pendingFromState(next) {
     const p = next.pending;
     if (p && typeof p.code === "number") {
-        return { code: p.code, name: p.name || `0x${p.code.toString(16)}`, action: p.action };
+        return {
+            code: p.code,
+            name: p.name || `0x${p.code.toString(16)}`,
+            action: p.action || "qam",
+        };
     }
     return null;
 }
@@ -130,11 +172,22 @@ function Content() {
     const [busy, setBusy] = SP_REACT.useState(false);
     const [error, setError] = SP_REACT.useState("");
     const [pending, setPending] = SP_REACT.useState(null);
+    const [reservedHint, setReservedHint] = SP_REACT.useState("");
     const [resetArmed, setResetArmed] = SP_REACT.useState(false);
+    const reservedShown = SP_REACT.useRef(false);
+    const pickTimers = SP_REACT.useRef([]);
+    const afterMenuClose = SP_REACT.useCallback((fn) => {
+        const id = window.setTimeout(fn, 80);
+        pickTimers.current.push(id);
+    }, []);
     const apply = SP_REACT.useCallback((next) => {
         setState(next);
         setError(next.error || "");
         setPending(pendingFromState(next));
+        if (!next.recording) {
+            reservedShown.current = false;
+            setReservedHint("");
+        }
     }, []);
     const refresh = SP_REACT.useCallback(async () => {
         try {
@@ -146,14 +199,19 @@ function Content() {
     }, [apply]);
     SP_REACT.useEffect(() => {
         void refresh();
+        return () => {
+            for (const id of pickTimers.current)
+                window.clearTimeout(id);
+            pickTimers.current = [];
+        };
     }, [refresh]);
     SP_REACT.useEffect(() => {
         const onRecorded = (payload) => {
             if (payload.reserved) {
-                toaster.toast({
-                    title: "CEC Remote",
-                    body: `${payload.name} is already used by Steam`,
-                });
+                if (!reservedShown.current) {
+                    reservedShown.current = true;
+                    setReservedHint(`${payload.name} is used by Steam. Turn on Override Steam buttons to map it.`);
+                }
                 return;
             }
             void refresh();
@@ -164,6 +222,8 @@ function Content() {
     const onAdd = async () => {
         setBusy(true);
         setError("");
+        reservedShown.current = false;
+        setReservedHint("");
         try {
             apply(await startRecord());
         }
@@ -186,12 +246,19 @@ function Content() {
             setBusy(false);
         }
     };
-    const onPickAction = async (action) => {
+    const onActionChange = (action) => {
+        afterMenuClose(() => {
+            void setPendingAction(action)
+                .then(apply)
+                .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+        });
+    };
+    const onSave = async () => {
         if (!pending)
             return;
         setBusy(true);
         try {
-            const next = await saveMapping(pending.code, pending.name, action);
+            const next = await saveMapping(pending.code, pending.name, pending.action || "qam");
             apply(next);
             if (!next.ok && next.error)
                 setError(next.error);
@@ -215,6 +282,18 @@ function Content() {
             setBusy(false);
         }
     };
+    const onOverride = async (enabled) => {
+        setBusy(true);
+        try {
+            apply(await setOverrideSteamButtons(enabled));
+        }
+        catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        }
+        finally {
+            setBusy(false);
+        }
+    };
     const onReset = async () => {
         if (!resetArmed) {
             setResetArmed(true);
@@ -224,7 +303,6 @@ function Content() {
         try {
             apply(await resetAll());
             setResetArmed(false);
-            toaster.toast({ title: "CEC Remote", body: "Mappings cleared, cecd defaults restored" });
         }
         catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -235,14 +313,16 @@ function Content() {
     };
     const mappings = state?.mappings || [];
     const recording = Boolean(state?.recording);
-    const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Status", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", opacity: 0.85, lineHeight: 1.35 }, children: state?.watch_ready
-                                ? state.cecd_override
-                                    ? "Listening to SteamOS cecd (plugin override active)"
-                                    : "Listening to SteamOS cecd"
-                                : state?.watch_error
-                                    ? `Watcher: ${state.watch_error}`
-                                    : "Starting CEC watcher…" }) }), error ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px" }, children: error }) })) : null] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [recording && !pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: "Press a TV remote button. D-pad, OK, Back, Play/Pause and skip keys are ignored \u2014 Steam already uses those." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: ["Recorded ", SP_JSX.jsx("b", { children: pending.name }), " (0x", pending.code.toString(16).padStart(2, "0"), "). Tap an action to save."] }) }), actionIds.map((id) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickAction(id), disabled: busy, children: actionLabel(id) }) }, id))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) })), mappings.length === 0 && !recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsxs("div", { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.35 }, children: [SP_JSX.jsx("b", { children: m.name }), " \u2192 ", actionLabel(m.action)] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: ["Remove ", m.name] }) })] }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Reset", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: 0.8, lineHeight: 1.35 }, children: "Clears plugin mappings and deletes our cecd fragment so SteamOS keyboard defaults come back. SteamOS manager files are left alone." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
+    const override = Boolean(state?.override_steam_buttons);
+    const actionOptions = SP_REACT.useMemo(() => (state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS)).map((id) => ({
+        data: id,
+        label: actionLabel(id),
+    })), [state]);
+    const watchError = !state?.watch_ready && (state?.watch_error || error);
+    const showStatus = Boolean(recording || pending || watchError || error);
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [showStatus ? (SP_JSX.jsxs(DFL.PanelSection, { title: recording || pending ? "Recording" : "Status", children: [watchError ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px", lineHeight: 1.35 }, children: state?.watch_error || error }) })) : error ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px" }, children: error }) })) : null, recording && !pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: override
+                                        ? "Press a TV remote button."
+                                        : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons." }) }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : pending ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: ["Recorded ", SP_JSX.jsx("b", { children: pending.name })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.Dropdown, { rgOptions: actionOptions, selectedOption: pending.action || "qam", menuLabel: "Action", onChange: (opt) => onActionChange(String(opt.data)) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onSave(), disabled: busy, children: "Save mapping" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] })) : null] })) : null, SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [!recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) })) : null, mappings.length === 0 && !recording && !pending ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m.action)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
 }
 var index = definePlugin(() => {
     addEventListener("cec_action", (action) => {

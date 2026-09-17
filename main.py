@@ -19,11 +19,15 @@ from cec_backend import (
     RESERVED,
     action_for_code,
     cecd_fragment_path,
+    default_settings,
     load_mappings,
+    load_settings,
     restore_cecd_defaults,
     save_mappings,
+    save_settings,
     session_debug,
     session_env,
+    set_override_steam_buttons,
     sync_cecd_uinput,
 )
 
@@ -41,13 +45,15 @@ class Plugin:
     _pending: dict | None = None
 
     def _state(self):
+        settings = load_settings()
         return {
             "ok": True,
             "watch_ready": self._watch_ready,
             "watch_error": self._watch_error,
             "recording": self._recording,
             "pending": self._pending,
-            "mappings": load_mappings(),
+            "mappings": settings["mappings"],
+            "override_steam_buttons": bool(settings.get("override_steam_buttons")),
             "reserved": [{"code": code, "name": name} for code, name in RESERVED.items()],
             "actions": list(ACTIONS),
             "cecd_override": os.path.exists(cecd_fragment_path()),
@@ -83,7 +89,7 @@ class Plugin:
             code_i = int(code)
         except (TypeError, ValueError):
             return {**self._state(), "ok": False, "error": "invalid code"}
-        if code_i in RESERVED:
+        if code_i in RESERVED and not load_settings().get("override_steam_buttons"):
             return {**self._state(), "ok": False, "error": "button is reserved for Steam"}
         if action not in ACTIONS:
             return {**self._state(), "ok": False, "error": "unknown action"}
@@ -104,10 +110,22 @@ class Plugin:
         await asyncio.get_running_loop().run_in_executor(None, self._sync_uinput)
         return self._state()
 
+    async def set_pending_action(self, action: str):
+        if action not in ACTIONS:
+            return {**self._state(), "ok": False, "error": "unknown action"}
+        if self._pending:
+            self._pending = {**self._pending, "action": action}
+        return self._state()
+
+    async def set_override_steam_buttons(self, enabled: bool):
+        set_override_steam_buttons(bool(enabled))
+        await asyncio.get_running_loop().run_in_executor(None, self._sync_uinput)
+        return self._state()
+
     async def reset_all(self):
         self._recording = False
         self._pending = None
-        save_mappings([])
+        save_settings(default_settings())
 
         def _restore():
             restore_cecd_defaults()
@@ -127,8 +145,9 @@ class Plugin:
         self._last_ts = now
 
         reserved = code in RESERVED
+        override = bool(load_settings().get("override_steam_buttons"))
         if self._recording:
-            if reserved:
+            if reserved and not override:
                 await decky.emit(
                     "cec_recorded",
                     {"ok": False, "reserved": True, "code": code, "name": name},

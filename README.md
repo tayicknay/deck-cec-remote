@@ -65,7 +65,9 @@ Local ZIP without CI: `./scripts/package-zip.sh`
 
 Mappings are stored under Decky’s plugin settings dir (`mappings.json`). The watcher keeps running when QAM is closed, so mapped buttons still fire.
 
-Saving a **number or color** mapping writes `~/.config/cecd/config.d/80-deck-cec-remote.toml`: the full factory `cecd` table with only those bound number/color keys omitted, so they stop typing. D-pad, OK, Back, play/pause, and the rest stay. SteamOS files (`00-` / `99-steamos-manager.toml`) are never touched. **Reset all** deletes our fragment and `mappings.json`, then reloads `cecd`.
+Saving a **number or color** mapping writes `~/.config/cecd/config.d/80-deck-cec-remote.toml`: the full factory `cecd` table with only those bound number/color keys omitted, so they stop typing. D-pad, OK, Back, play/pause stay unless **Override Steam buttons** is on and you map them. SteamOS files (`00-` / `99-steamos-manager.toml`) are never touched. **Reset all** deletes our fragment and `mappings.json`, then reloads `cecd`.
+
+**Open Quick Access Menu** and **Open Steam menu** toggle: a second press closes the menu.
 
 **Downloads** uses `Navigation.Navigate("/library/downloads")`. If that path is wrong on your Steam build, say so and we will change it.
 
