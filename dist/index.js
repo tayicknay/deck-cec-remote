@@ -85,11 +85,22 @@ function FaTv (props) {
 }
 
 const ACTION_LABELS = {
-    qam: "Open Quick Access Menu",
-    steam_menu: "Open Steam menu",
-    library: "Open Library",
-    downloads: "Open Downloads",
+    qam: "Quick Access Menu",
+    steam_menu: "Steam Menu",
+    library: "Library",
+    downloads: "Downloads",
+    settings: "Settings",
+    power: "Power",
+    friends: "Friends",
+    chat: "Chat",
+    screenshot: "Screenshot",
+    keyboard: "Keyboard",
+    controller: "Controller Settings",
+    cheat_sheet: "Cheat Sheet",
+    launch: "Launch …",
 };
+/** USB HID F12 — Steam's default screenshot key. */
+const HID_F12 = 69;
 const getState = callable("get_state");
 const startRecord = callable("start_record");
 const cancelRecord = callable("cancel_record");
@@ -128,7 +139,102 @@ function isSteamMenuOpen() {
         return lower.includes("mainmenu") || lower.includes("mainnav") || lower === "menu-na";
     });
 }
-function runAction(action) {
+let cheatSheetModal = null;
+function closeCheatSheet() {
+    try {
+        cheatSheetModal?.Close();
+    }
+    catch {
+        /* ignore */
+    }
+    cheatSheetModal = null;
+}
+async function toggleCheatSheet() {
+    if (cheatSheetModal) {
+        closeCheatSheet();
+        return;
+    }
+    let mappings = [];
+    try {
+        mappings = (await getState()).mappings || [];
+    }
+    catch {
+        /* still show an empty sheet */
+    }
+    DFL.Navigation.CloseSideMenus();
+    cheatSheetModal = DFL.showModal(SP_JSX.jsx(DFL.ModalRoot, { closeModal: closeCheatSheet, bAllowFullSize: false, children: SP_JSX.jsxs("div", { style: { padding: "8px 12px 16px", minWidth: "280px" }, children: [SP_JSX.jsx("div", { style: { fontSize: "20px", fontWeight: 700, marginBottom: "6px" }, children: "CEC mappings" }), SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: 0.7, marginBottom: "14px" }, children: "Mapped buttons only. Press the cheat-sheet key again to close." }), mappings.length === 0 ? (SP_JSX.jsx("div", { style: { fontSize: "14px", opacity: 0.75 }, children: "No custom mappings yet" })) : (mappings.map((m) => (SP_JSX.jsxs("div", { style: {
+                        display: "flex",
+                        justifyContent: "space-between",
+                        gap: "16px",
+                        fontSize: "15px",
+                        lineHeight: 1.45,
+                        padding: "6px 0",
+                        borderBottom: "1px solid rgba(255,255,255,0.08)",
+                    }, children: [SP_JSX.jsx("span", { style: { fontWeight: 600 }, children: m.name }), SP_JSX.jsx("span", { style: { opacity: 0.85, textAlign: "right" }, children: actionLabel(m) })] }, m.code))))] }) }));
+}
+function steamClient() {
+    return window.SteamClient;
+}
+function focusedWindow() {
+    const store = window.SteamUIStore;
+    try {
+        return store?.GetFocusedWindowInstance?.();
+    }
+    catch {
+        return store?.WindowStore?.GamepadUIMainWindowInstance;
+    }
+}
+function takeScreenshot() {
+    const sc = steamClient();
+    const shots = sc?.Screenshots;
+    if (typeof shots?.TriggerScreenshot === "function") {
+        shots.TriggerScreenshot();
+        return;
+    }
+    if (typeof shots?.TakeScreenshot === "function") {
+        shots.TakeScreenshot();
+        return;
+    }
+    try {
+        sc?.URL?.ExecuteSteamURL?.("steam://screenshot");
+    }
+    catch {
+        /* ignore */
+    }
+    try {
+        sc?.Input?.ControllerKeyboardSetKeyState?.(HID_F12, true);
+        sc?.Input?.ControllerKeyboardSetKeyState?.(HID_F12, false);
+    }
+    catch {
+        /* ignore */
+    }
+}
+function showKeyboard() {
+    const vk = focusedWindow()?.VirtualKeyboardManager;
+    if (vk) {
+        if (typeof vk.SetVirtualKeyboardVisible === "function") {
+            vk.SetVirtualKeyboardVisible(true);
+            return;
+        }
+        if (typeof vk.ShowVirtualKeyboard === "function") {
+            vk.ShowVirtualKeyboard();
+            return;
+        }
+        if (typeof vk.SetVirtualKeyboardHidden === "function") {
+            vk.SetVirtualKeyboardHidden(false);
+            return;
+        }
+    }
+    try {
+        steamClient()?.URL?.ExecuteSteamURL?.("steam://open/keyboard");
+    }
+    catch {
+        /* ignore */
+    }
+}
+function runAction(payload) {
+    const action = typeof payload === "string" ? payload : payload.action;
+    const appid = typeof payload === "string" ? undefined : payload.appid;
     switch (action) {
         case "qam":
             if (isQamOpen())
@@ -150,10 +256,125 @@ function runAction(action) {
             DFL.Navigation.CloseSideMenus();
             DFL.Navigation.Navigate("/library/downloads");
             break;
+        case "settings":
+            DFL.Navigation.CloseSideMenus();
+            DFL.Navigation.Navigate("/settings");
+            break;
+        case "power":
+            DFL.Navigation.CloseSideMenus();
+            DFL.Navigation.OpenPowerMenu();
+            break;
+        case "friends":
+            DFL.Navigation.CloseSideMenus();
+            DFL.Navigation.Navigate("/friends");
+            break;
+        case "chat":
+            DFL.Navigation.CloseSideMenus();
+            DFL.Navigation.NavigateToChat();
+            break;
+        case "screenshot":
+            DFL.Navigation.CloseSideMenus();
+            window.setTimeout(() => takeScreenshot(), 200);
+            break;
+        case "keyboard":
+            showKeyboard();
+            break;
+        case "controller":
+            DFL.Navigation.CloseSideMenus();
+            try {
+                steamClient()?.Input?.ShowControllerSettings?.();
+            }
+            catch {
+                DFL.Navigation.Navigate("/settings/controller");
+            }
+            break;
+        case "cheat_sheet":
+            void toggleCheatSheet();
+            break;
+        case "launch":
+            if (appid == null)
+                break;
+            DFL.Navigation.CloseSideMenus();
+            try {
+                steamClient()?.Apps?.RunGame(String(appid), "", -1, 200);
+            }
+            catch {
+                /* ignore */
+            }
+            break;
     }
 }
-function actionLabel(action) {
-    return ACTION_LABELS[action] || action;
+function actionLabel(mapping) {
+    if (typeof mapping === "string")
+        return ACTION_LABELS[mapping] || mapping;
+    if (mapping.action === "launch") {
+        return mapping.app_name ? `Launch ${mapping.app_name}` : "Launch …";
+    }
+    return ACTION_LABELS[mapping.action] || mapping.action;
+}
+function collectApps(src, out) {
+    if (!src)
+        return;
+    let list = [];
+    if (Array.isArray(src))
+        list = src;
+    else {
+        try {
+            if (typeof src.values === "function")
+                list = Array.from(src.values());
+            else if (typeof src[Symbol.iterator] === "function")
+                list = Array.from(src);
+        }
+        catch {
+            list = [];
+        }
+    }
+    for (const app of list) {
+        if (!app)
+            continue;
+        const appid = Number(app.appid);
+        const name = String(app.display_name || app.displayName || app.sort_as || "").trim();
+        if (!appid || !name)
+            continue;
+        if (app.visible_in_game_list === false)
+            continue;
+        const lastPlayed = Number(app.rt_last_time_played || app.rt_last_time_locally_played || 0) || 0;
+        const prev = out.get(appid);
+        if (!prev || lastPlayed > prev.lastPlayed)
+            out.set(appid, { appid, name, lastPlayed });
+    }
+}
+function listLibraryApps() {
+    const out = new Map();
+    const cs = window.collectionStore;
+    if (cs) {
+        for (const col of [
+            cs.allGamesCollection,
+            cs.allAppsCollection,
+            cs.localGamesCollection,
+            cs.deckDesktopApps,
+        ]) {
+            collectApps(col?.allApps, out);
+            collectApps(col?.apps, out);
+        }
+        const map = cs.appTypeCollectionMap;
+        if (map && typeof map.values === "function") {
+            try {
+                for (const col of map.values()) {
+                    collectApps(col?.allApps, out);
+                    collectApps(col?.apps, out);
+                }
+            }
+            catch {
+                /* ignore */
+            }
+        }
+    }
+    return [...out.values()].sort((a, b) => {
+        if (a.lastPlayed !== b.lastPlayed)
+            return b.lastPlayed - a.lastPlayed;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
 }
 function pendingFromState(next) {
     const p = next.pending;
@@ -171,6 +392,14 @@ function ErrorRows({ error }) {
         return null;
     return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px", lineHeight: 1.35 }, children: error }) }));
 }
+function RecordedButton({ name }) {
+    return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: {
+                fontSize: "16px",
+                fontWeight: 600,
+                lineHeight: 1.3,
+                padding: "4px 0 18px",
+            }, children: name }) }));
+}
 function Content() {
     const [state, setState] = SP_REACT.useState(null);
     const [busy, setBusy] = SP_REACT.useState(false);
@@ -178,6 +407,7 @@ function Content() {
     const [pending, setPending] = SP_REACT.useState(null);
     const [reservedHint, setReservedHint] = SP_REACT.useState("");
     const [resetArmed, setResetArmed] = SP_REACT.useState(false);
+    const [pickingLaunch, setPickingLaunch] = SP_REACT.useState(false);
     const reservedShown = SP_REACT.useRef(false);
     const apply = SP_REACT.useCallback((next) => {
         setState(next);
@@ -186,6 +416,7 @@ function Content() {
         if (!next.recording && !next.pending) {
             reservedShown.current = false;
             setReservedHint("");
+            setPickingLaunch(false);
         }
     }, []);
     const refresh = SP_REACT.useCallback(async () => {
@@ -220,6 +451,7 @@ function Content() {
         setError("");
         reservedShown.current = false;
         setReservedHint("");
+        setPickingLaunch(false);
         try {
             apply(await startRecord());
         }
@@ -232,6 +464,7 @@ function Content() {
     };
     const onCancel = async () => {
         setBusy(true);
+        setPickingLaunch(false);
         try {
             apply(await cancelRecord());
         }
@@ -245,9 +478,30 @@ function Content() {
     const onPickAction = async (action) => {
         if (!pending)
             return;
+        if (action === "launch") {
+            setPickingLaunch(true);
+            return;
+        }
         setBusy(true);
         try {
             const next = await saveMapping(pending.code, pending.name, action);
+            apply(next);
+            if (!next.ok && next.error)
+                setError(next.error);
+        }
+        catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        }
+        finally {
+            setBusy(false);
+        }
+    };
+    const onPickApp = async (app) => {
+        if (!pending)
+            return;
+        setBusy(true);
+        try {
+            const next = await saveMapping(pending.code, pending.name, "launch", app.appid, app.name);
             apply(next);
             if (!next.ok && next.error)
                 setError(next.error);
@@ -305,20 +559,24 @@ function Content() {
     const override = Boolean(state?.override_steam_buttons);
     const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
     const watchError = !state?.watch_ready ? state?.watch_error || error : error;
-    const screen = pending ? "pick" : recording ? "record" : "home";
+    const screen = pickingLaunch && pending ? "launch" : pending ? "pick" : recording ? "record" : "home";
     if (screen === "record") {
         return (SP_JSX.jsxs(DFL.PanelSection, { title: "Record button", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: override
                             ? "Press a TV remote button."
                             : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons." }) }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] }));
     }
     if (screen === "pick") {
-        return (SP_JSX.jsxs(DFL.PanelSection, { title: "Choose action", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: ["Last button: ", SP_JSX.jsx("b", { children: pending?.name })] }) }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, actionIds.map((id) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickAction(id), disabled: busy, children: actionLabel(id) }) }, id))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] }));
+        return (SP_JSX.jsxs(DFL.PanelSection, { title: "Choose action", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(RecordedButton, { name: pending?.name || "" }), reservedHint ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "13px", lineHeight: 1.4 }, children: reservedHint }) })) : null, actionIds.map((id) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickAction(id), disabled: busy, children: actionLabel(id) }) }, id))), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onCancel(), disabled: busy, children: "Cancel" }) })] }));
     }
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) }), mappings.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m.action)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
+    if (screen === "launch") {
+        const apps = listLibraryApps();
+        return (SP_JSX.jsxs(DFL.PanelSection, { title: "Launch", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(RecordedButton, { name: pending?.name || "" }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setPickingLaunch(false), disabled: busy, children: "Back" }) }), apps.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No games or programs found" }) })) : (apps.map((app) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickApp(app), disabled: busy, children: app.name }) }, app.appid))))] }));
+    }
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) }), mappings.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
 }
 var index = definePlugin(() => {
-    addEventListener("cec_action", (action) => {
-        runAction(action);
+    addEventListener("cec_action", (payload) => {
+        runAction(payload);
     });
     return {
         name: "CEC Remote",

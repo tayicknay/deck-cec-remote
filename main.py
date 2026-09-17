@@ -84,7 +84,14 @@ class Plugin:
         self._pending = None
         return self._state()
 
-    async def save_mapping(self, code: int, name: str, action: str):
+    async def save_mapping(
+        self,
+        code: int,
+        name: str,
+        action: str,
+        appid: int | None = None,
+        app_name: str = "",
+    ):
         try:
             code_i = int(code)
         except (TypeError, ValueError):
@@ -93,8 +100,15 @@ class Plugin:
             return {**self._state(), "ok": False, "error": "button is reserved for Steam"}
         if action not in ACTIONS:
             return {**self._state(), "ok": False, "error": "unknown action"}
+        entry: dict = {"code": code_i, "name": name or f"0x{code_i:02X}", "action": action}
+        if action == "launch":
+            try:
+                entry["appid"] = int(appid)
+            except (TypeError, ValueError):
+                return {**self._state(), "ok": False, "error": "missing app"}
+            entry["app_name"] = str(app_name or entry["appid"])
         mappings = [m for m in load_mappings() if int(m["code"]) != code_i]
-        mappings.append({"code": code_i, "name": name or f"0x{code_i:02X}", "action": action})
+        mappings.append(entry)
         save_mappings(mappings)
         self._recording = False
         self._pending = None
@@ -162,7 +176,15 @@ class Plugin:
 
         action = action_for_code(code)
         if action:
-            await decky.emit("cec_action", action)
+            payload = {"action": action}
+            for item in load_mappings():
+                if int(item["code"]) == code:
+                    if item.get("appid") is not None:
+                        payload["appid"] = item["appid"]
+                    if item.get("app_name"):
+                        payload["app_name"] = item["app_name"]
+                    break
+            await decky.emit("cec_action", payload)
 
     async def _watch_loop(self):
         assert self._stop is not None

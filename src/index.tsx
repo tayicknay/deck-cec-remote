@@ -1,11 +1,14 @@
 import {
   ButtonItem,
+  ModalRoot,
   Navigation,
   PanelSection,
   PanelSectionRow,
   ToggleField,
   getGamepadNavigationTrees,
+  showModal,
   staticClasses,
+  type ShowModalResult,
 } from "@decky/ui";
 import {
   addEventListener,
@@ -20,6 +23,8 @@ type Mapping = {
   code: number;
   name: string;
   action: string;
+  appid?: number;
+  app_name?: string;
 };
 
 type Pending = {
@@ -49,19 +54,44 @@ type Recorded = {
   name: string;
 };
 
-const ACTION_LABELS: Record<string, string> = {
-  qam: "Open Quick Access Menu",
-  steam_menu: "Open Steam menu",
-  library: "Open Library",
-  downloads: "Open Downloads",
+type ActionPayload = {
+  action: string;
+  appid?: number;
+  app_name?: string;
 };
+
+type LibApp = {
+  appid: number;
+  name: string;
+  lastPlayed: number;
+};
+
+const ACTION_LABELS: Record<string, string> = {
+  qam: "Quick Access Menu",
+  steam_menu: "Steam Menu",
+  library: "Library",
+  downloads: "Downloads",
+  settings: "Settings",
+  power: "Power",
+  friends: "Friends",
+  chat: "Chat",
+  screenshot: "Screenshot",
+  keyboard: "Keyboard",
+  controller: "Controller Settings",
+  cheat_sheet: "Cheat Sheet",
+  launch: "Launch …",
+};
+
+/** USB HID F12 — Steam's default screenshot key. */
+const HID_F12 = 69;
 
 const getState = callable<[], PluginState>("get_state");
 const startRecord = callable<[], PluginState>("start_record");
 const cancelRecord = callable<[], PluginState>("cancel_record");
-const saveMapping = callable<[code: number, name: string, action: string], PluginState>(
-  "save_mapping"
-);
+const saveMapping = callable<
+  [code: number, name: string, action: string, appid?: number, app_name?: string],
+  PluginState
+>("save_mapping");
 const deleteMapping = callable<[code: number], PluginState>("delete_mapping");
 const setOverrideSteamButtons = callable<[enabled: boolean], PluginState>(
   "set_override_steam_buttons"
@@ -98,7 +128,125 @@ function isSteamMenuOpen(): boolean {
   });
 }
 
-function runAction(action: string): void {
+let cheatSheetModal: ShowModalResult | null = null;
+
+function closeCheatSheet(): void {
+  try {
+    cheatSheetModal?.Close();
+  } catch {
+    /* ignore */
+  }
+  cheatSheetModal = null;
+}
+
+async function toggleCheatSheet(): Promise<void> {
+  if (cheatSheetModal) {
+    closeCheatSheet();
+    return;
+  }
+  let mappings: Mapping[] = [];
+  try {
+    mappings = (await getState()).mappings || [];
+  } catch {
+    /* still show an empty sheet */
+  }
+  Navigation.CloseSideMenus();
+  cheatSheetModal = showModal(
+    <ModalRoot closeModal={closeCheatSheet} bAllowFullSize={false}>
+      <div style={{ padding: "8px 12px 16px", minWidth: "280px" }}>
+        <div style={{ fontSize: "20px", fontWeight: 700, marginBottom: "6px" }}>CEC mappings</div>
+        <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "14px" }}>
+          Mapped buttons only. Press the cheat-sheet key again to close.
+        </div>
+        {mappings.length === 0 ? (
+          <div style={{ fontSize: "14px", opacity: 0.75 }}>No custom mappings yet</div>
+        ) : (
+          mappings.map((m) => (
+            <div
+              key={m.code}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: "16px",
+                fontSize: "15px",
+                lineHeight: 1.45,
+                padding: "6px 0",
+                borderBottom: "1px solid rgba(255,255,255,0.08)",
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>{m.name}</span>
+              <span style={{ opacity: 0.85, textAlign: "right" }}>{actionLabel(m)}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </ModalRoot>
+  );
+}
+
+function steamClient(): any {
+  return (window as any).SteamClient;
+}
+
+function focusedWindow(): any {
+  const store = (window as any).SteamUIStore;
+  try {
+    return store?.GetFocusedWindowInstance?.();
+  } catch {
+    return store?.WindowStore?.GamepadUIMainWindowInstance;
+  }
+}
+
+function takeScreenshot(): void {
+  const sc = steamClient();
+  const shots = sc?.Screenshots;
+  if (typeof shots?.TriggerScreenshot === "function") {
+    shots.TriggerScreenshot();
+    return;
+  }
+  if (typeof shots?.TakeScreenshot === "function") {
+    shots.TakeScreenshot();
+    return;
+  }
+  try {
+    sc?.URL?.ExecuteSteamURL?.("steam://screenshot");
+  } catch {
+    /* ignore */
+  }
+  try {
+    sc?.Input?.ControllerKeyboardSetKeyState?.(HID_F12, true);
+    sc?.Input?.ControllerKeyboardSetKeyState?.(HID_F12, false);
+  } catch {
+    /* ignore */
+  }
+}
+
+function showKeyboard(): void {
+  const vk = focusedWindow()?.VirtualKeyboardManager;
+  if (vk) {
+    if (typeof vk.SetVirtualKeyboardVisible === "function") {
+      vk.SetVirtualKeyboardVisible(true);
+      return;
+    }
+    if (typeof vk.ShowVirtualKeyboard === "function") {
+      vk.ShowVirtualKeyboard();
+      return;
+    }
+    if (typeof vk.SetVirtualKeyboardHidden === "function") {
+      vk.SetVirtualKeyboardHidden(false);
+      return;
+    }
+  }
+  try {
+    steamClient()?.URL?.ExecuteSteamURL?.("steam://open/keyboard");
+  } catch {
+    /* ignore */
+  }
+}
+
+function runAction(payload: ActionPayload | string): void {
+  const action = typeof payload === "string" ? payload : payload.action;
+  const appid = typeof payload === "string" ? undefined : payload.appid;
   switch (action) {
     case "qam":
       if (isQamOpen()) Navigation.CloseSideMenus();
@@ -116,13 +264,115 @@ function runAction(action: string): void {
       Navigation.CloseSideMenus();
       Navigation.Navigate("/library/downloads");
       break;
+    case "settings":
+      Navigation.CloseSideMenus();
+      Navigation.Navigate("/settings");
+      break;
+    case "power":
+      Navigation.CloseSideMenus();
+      Navigation.OpenPowerMenu();
+      break;
+    case "friends":
+      Navigation.CloseSideMenus();
+      Navigation.Navigate("/friends");
+      break;
+    case "chat":
+      Navigation.CloseSideMenus();
+      Navigation.NavigateToChat();
+      break;
+    case "screenshot":
+      Navigation.CloseSideMenus();
+      window.setTimeout(() => takeScreenshot(), 200);
+      break;
+    case "keyboard":
+      showKeyboard();
+      break;
+    case "controller":
+      Navigation.CloseSideMenus();
+      try {
+        steamClient()?.Input?.ShowControllerSettings?.();
+      } catch {
+        Navigation.Navigate("/settings/controller");
+      }
+      break;
+    case "cheat_sheet":
+      void toggleCheatSheet();
+      break;
+    case "launch":
+      if (appid == null) break;
+      Navigation.CloseSideMenus();
+      try {
+        steamClient()?.Apps?.RunGame(String(appid), "", -1, 200);
+      } catch {
+        /* ignore */
+      }
+      break;
     default:
       break;
   }
 }
 
-function actionLabel(action: string): string {
-  return ACTION_LABELS[action] || action;
+function actionLabel(mapping: Mapping | string): string {
+  if (typeof mapping === "string") return ACTION_LABELS[mapping] || mapping;
+  if (mapping.action === "launch") {
+    return mapping.app_name ? `Launch ${mapping.app_name}` : "Launch …";
+  }
+  return ACTION_LABELS[mapping.action] || mapping.action;
+}
+
+function collectApps(src: unknown, out: Map<number, LibApp>): void {
+  if (!src) return;
+  let list: any[] = [];
+  if (Array.isArray(src)) list = src;
+  else {
+    try {
+      if (typeof (src as any).values === "function") list = Array.from((src as any).values());
+      else if (typeof (src as any)[Symbol.iterator] === "function") list = Array.from(src as any);
+    } catch {
+      list = [];
+    }
+  }
+  for (const app of list) {
+    if (!app) continue;
+    const appid = Number(app.appid);
+    const name = String(app.display_name || app.displayName || app.sort_as || "").trim();
+    if (!appid || !name) continue;
+    if (app.visible_in_game_list === false) continue;
+    const lastPlayed = Number(app.rt_last_time_played || app.rt_last_time_locally_played || 0) || 0;
+    const prev = out.get(appid);
+    if (!prev || lastPlayed > prev.lastPlayed) out.set(appid, { appid, name, lastPlayed });
+  }
+}
+
+function listLibraryApps(): LibApp[] {
+  const out = new Map<number, LibApp>();
+  const cs = (window as any).collectionStore;
+  if (cs) {
+    for (const col of [
+      cs.allGamesCollection,
+      cs.allAppsCollection,
+      cs.localGamesCollection,
+      cs.deckDesktopApps,
+    ]) {
+      collectApps(col?.allApps, out);
+      collectApps(col?.apps, out);
+    }
+    const map = cs.appTypeCollectionMap;
+    if (map && typeof map.values === "function") {
+      try {
+        for (const col of map.values()) {
+          collectApps(col?.allApps, out);
+          collectApps(col?.apps, out);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return [...out.values()].sort((a, b) => {
+    if (a.lastPlayed !== b.lastPlayed) return b.lastPlayed - a.lastPlayed;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
 }
 
 function pendingFromState(next: PluginState): Pending | null {
@@ -146,6 +396,23 @@ function ErrorRows({ error }: { error: string }) {
   );
 }
 
+function RecordedButton({ name }: { name: string }) {
+  return (
+    <PanelSectionRow>
+      <div
+        style={{
+          fontSize: "16px",
+          fontWeight: 600,
+          lineHeight: 1.3,
+          padding: "4px 0 18px",
+        }}
+      >
+        {name}
+      </div>
+    </PanelSectionRow>
+  );
+}
+
 function Content() {
   const [state, setState] = useState<PluginState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -153,6 +420,7 @@ function Content() {
   const [pending, setPending] = useState<Pending | null>(null);
   const [reservedHint, setReservedHint] = useState("");
   const [resetArmed, setResetArmed] = useState(false);
+  const [pickingLaunch, setPickingLaunch] = useState(false);
   const reservedShown = useRef(false);
 
   const apply = useCallback((next: PluginState) => {
@@ -162,6 +430,7 @@ function Content() {
     if (!next.recording && !next.pending) {
       reservedShown.current = false;
       setReservedHint("");
+      setPickingLaunch(false);
     }
   }, []);
 
@@ -201,6 +470,7 @@ function Content() {
     setError("");
     reservedShown.current = false;
     setReservedHint("");
+    setPickingLaunch(false);
     try {
       apply(await startRecord());
     } catch (e) {
@@ -212,6 +482,7 @@ function Content() {
 
   const onCancel = async () => {
     setBusy(true);
+    setPickingLaunch(false);
     try {
       apply(await cancelRecord());
     } catch (e) {
@@ -223,9 +494,27 @@ function Content() {
 
   const onPickAction = async (action: string) => {
     if (!pending) return;
+    if (action === "launch") {
+      setPickingLaunch(true);
+      return;
+    }
     setBusy(true);
     try {
       const next = await saveMapping(pending.code, pending.name, action);
+      apply(next);
+      if (!next.ok && next.error) setError(next.error);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPickApp = async (app: LibApp) => {
+    if (!pending) return;
+    setBusy(true);
+    try {
+      const next = await saveMapping(pending.code, pending.name, "launch", app.appid, app.name);
       apply(next);
       if (!next.ok && next.error) setError(next.error);
     } catch (e) {
@@ -278,7 +567,7 @@ function Content() {
   const override = Boolean(state?.override_steam_buttons);
   const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
   const watchError = !state?.watch_ready ? state?.watch_error || error : error;
-  const screen = pending ? "pick" : recording ? "record" : "home";
+  const screen = pickingLaunch && pending ? "launch" : pending ? "pick" : recording ? "record" : "home";
 
   if (screen === "record") {
     return (
@@ -309,11 +598,7 @@ function Content() {
     return (
       <PanelSection title="Choose action">
         <ErrorRows error={watchError} />
-        <PanelSectionRow>
-          <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
-            Last button: <b>{pending?.name}</b>
-          </div>
-        </PanelSectionRow>
+        <RecordedButton name={pending?.name || ""} />
         {reservedHint ? (
           <PanelSectionRow>
             <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
@@ -335,6 +620,34 @@ function Content() {
     );
   }
 
+  if (screen === "launch") {
+    const apps = listLibraryApps();
+    return (
+      <PanelSection title="Launch">
+        <ErrorRows error={watchError} />
+        <RecordedButton name={pending?.name || ""} />
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => setPickingLaunch(false)} disabled={busy}>
+            Back
+          </ButtonItem>
+        </PanelSectionRow>
+        {apps.length === 0 ? (
+          <PanelSectionRow>
+            <div style={{ opacity: 0.7, fontSize: "13px" }}>No games or programs found</div>
+          </PanelSectionRow>
+        ) : (
+          apps.map((app) => (
+            <PanelSectionRow key={app.appid}>
+              <ButtonItem layout="below" onClick={() => void onPickApp(app)} disabled={busy}>
+                {app.name}
+              </ButtonItem>
+            </PanelSectionRow>
+          ))
+        )}
+      </PanelSection>
+    );
+  }
+
   return (
     <>
       <PanelSection title="Mappings">
@@ -352,7 +665,7 @@ function Content() {
           mappings.map((m) => (
             <PanelSectionRow key={m.code}>
               <ButtonItem
-                label={`${m.name} → ${actionLabel(m.action)}`}
+                label={`${m.name} → ${actionLabel(m)}`}
                 layout="below"
                 onClick={() => void onDelete(m.code)}
                 disabled={busy}
@@ -384,8 +697,8 @@ function Content() {
 }
 
 export default definePlugin(() => {
-  addEventListener("cec_action", (action: string) => {
-    runAction(action);
+  addEventListener("cec_action", (payload: ActionPayload | string) => {
+    runAction(payload);
   });
 
   return {

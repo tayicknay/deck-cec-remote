@@ -26,7 +26,21 @@ RESERVED: dict[int, str] = {
     0x4C: "skip-backward",
 }
 
-ACTIONS = ("qam", "steam_menu", "library", "downloads")
+ACTIONS = (
+    "qam",
+    "steam_menu",
+    "library",
+    "downloads",
+    "settings",
+    "power",
+    "friends",
+    "chat",
+    "screenshot",
+    "keyboard",
+    "controller",
+    "cheat_sheet",
+    "launch",
+)
 
 _STEAM_UID = re.compile(r"/run/user/(\d+)")
 
@@ -121,11 +135,21 @@ def save_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _action_key(entry: dict[str, Any]) -> tuple[Any, ...]:
+    """One button per action. Launch is unique per app, not per 'launch'."""
+    action = str(entry.get("action") or "")
+    if action == "launch":
+        try:
+            return (action, int(entry["appid"]))
+        except (KeyError, TypeError, ValueError):
+            return (action, None)
+    return (action,)
+
+
 def _clean_mappings(raw: Any, override: bool) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
-    out: list[dict[str, Any]] = []
-    seen: set[int] = set()
+    collected: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -133,22 +157,30 @@ def _clean_mappings(raw: Any, override: bool) -> list[dict[str, Any]]:
             code = int(item["code"])
         except (KeyError, TypeError, ValueError):
             continue
-        if code in seen:
-            continue
         if code in RESERVED and not override:
             continue
         action = str(item.get("action") or "")
         if action not in ACTIONS:
             continue
-        seen.add(code)
-        out.append(
-            {
-                "code": code,
-                "name": str(item.get("name") or f"0x{code:02X}"),
-                "action": action,
-            }
-        )
-    return out
+        entry: dict[str, Any] = {
+            "code": code,
+            "name": str(item.get("name") or f"0x{code:02X}"),
+            "action": action,
+        }
+        if action == "launch":
+            try:
+                entry["appid"] = int(item["appid"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            entry["app_name"] = str(item.get("app_name") or entry["appid"])
+        collected.append(entry)
+    by_code: dict[int, dict[str, Any]] = {}
+    for entry in collected:
+        by_code[int(entry["code"])] = entry
+    by_action: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for entry in by_code.values():
+        by_action[_action_key(entry)] = entry
+    return list(by_action.values())
 
 
 def load_mappings() -> list[dict[str, Any]]:
@@ -257,8 +289,8 @@ FACTORY_UINPUT: list[tuple[int, tuple[str, ...], tuple[int, ...]]] = [
     (631, ("data",), (0x76,)),
 ]
 
-# Only these may be removed from the cecd keyboard. D-pad / OK / Back / transport
-# always stay in the factory table, even if someone later maps something else.
+# Numbers/colors are omitted from cecd when mapped. Reserved Steam keys are
+# omitted only if Override is on and that specific key has a mapping.
 NUMBER_CODES = frozenset({0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29})
 COLOR_CODES = frozenset({0x71, 0x72, 0x73, 0x74})
 WIPEABLE_CODES = NUMBER_CODES | COLOR_CODES
@@ -306,7 +338,7 @@ def render_cecd_mappings(stolen: set[int]) -> str:
     lines = [
         "# Written by deck-cec-remote. Do not edit SteamOS 00-/99- files.",
         "# Full mappings table (cecd replaces compiled defaults if present).",
-        "# Only mapped number and color keys are omitted. Everything else stays.",
+        "# Mapped numbers/colors (and overridden Steam keys) are omitted. Everything else stays.",
         "# Delete this file to restore defaults.",
         "mappings = {",
     ]
