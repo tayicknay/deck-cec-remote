@@ -392,6 +392,28 @@ function ErrorRows({ error }) {
         return null;
     return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { color: "#f88", fontSize: "12px", lineHeight: 1.35 }, children: error }) }));
 }
+function yn(ok) {
+    return ok ? "yes" : "no";
+}
+function CecDebug({ state }) {
+    const cec = state?.cec;
+    const listening = Boolean(state?.watch_ready);
+    let hdmi = "unknown";
+    if (!cec?.adapter)
+        hdmi = "no adapter";
+    else if (cec.hdmi_link)
+        hdmi = `connected (${cec.phys_addr || "?"})`;
+    else if (cec.phys_addr)
+        hdmi = `no link (${cec.phys_addr})`;
+    else
+        hdmi = "adapter, no phys addr";
+    const line = [
+        `HDMI ${hdmi}`,
+        `cecd ${yn(Boolean(cec?.cecd))}`,
+        `listener ${listening ? "yes" : "no"}`,
+    ].join("  ·  ");
+    return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px", opacity: 0.8, lineHeight: 1.45 }, children: [line, cec?.device ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("br", {}), cec.device, cec.osd_name ? `  ·  ${cec.osd_name}` : ""] })) : null, state?.watch_error ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx("br", {}), state.watch_error] })) : null] }) }));
+}
 function RecordedButton({ name }) {
     return (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: {
                 fontSize: "16px",
@@ -430,6 +452,12 @@ function Content() {
     SP_REACT.useEffect(() => {
         void refresh();
     }, [refresh]);
+    SP_REACT.useEffect(() => {
+        if (pending || state?.recording)
+            return;
+        const id = window.setInterval(() => void refresh(), 4000);
+        return () => window.clearInterval(id);
+    }, [pending, state?.recording, refresh]);
     SP_REACT.useEffect(() => {
         const onRecorded = (payload) => {
             if (payload.reserved) {
@@ -572,7 +600,7 @@ function Content() {
         const apps = listLibraryApps();
         return (SP_JSX.jsxs(DFL.PanelSection, { title: "Launch", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(RecordedButton, { name: pending?.name || "" }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => setPickingLaunch(false), disabled: busy, children: "Back" }) }), apps.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No games or programs found" }) })) : (apps.map((app) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onPickApp(app), disabled: busy, children: app.name }) }, app.appid))))] }));
     }
-    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) }), mappings.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
+    return (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSection, { title: "CEC", children: SP_JSX.jsx(CecDebug, { state: state }) }), SP_JSX.jsxs(DFL.PanelSection, { title: "Mappings", children: [SP_JSX.jsx(ErrorRows, { error: watchError }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onAdd(), disabled: busy || !state?.watch_ready, children: "Add mapping" }) }), mappings.length === 0 ? (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { opacity: 0.7, fontSize: "13px" }, children: "No mappings yet" }) })) : (mappings.map((m) => (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { label: `${m.name} → ${actionLabel(m)}`, layout: "below", onClick: () => void onDelete(m.code), disabled: busy, children: "Remove" }) }, m.code))))] }), SP_JSX.jsxs(DFL.PanelSection, { title: "Settings", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Override Steam buttons", description: "Allow mapping d-pad, Back, Play, and other keys Steam already uses.", checked: override, disabled: busy, onChange: (v) => void onOverride(v) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => void onReset(), disabled: busy, children: resetArmed ? "Tap again to confirm reset" : "Reset all" }) })] })] }));
 }
 var index = definePlugin(() => {
     addEventListener("cec_action", (payload) => {

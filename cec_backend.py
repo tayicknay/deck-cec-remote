@@ -91,6 +91,59 @@ def session_debug() -> dict[str, Any]:
     }
 
 
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _cecd_on_bus() -> bool:
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [
+                "busctl",
+                "--user",
+                "call",
+                "org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "NameHasOwner",
+                "s",
+                "com.steampowered.CecDaemon1",
+            ],
+            env=session_env(),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return proc.returncode == 0 and "true" in (proc.stdout or "").lower()
+    except Exception:
+        return False
+
+
+def cec_status() -> dict[str, Any]:
+    """HDMI adapter + cecd presence. Does not open /dev/cec0."""
+    sysfs = "/sys/class/cec/cec0"
+    node = "/dev/cec0"
+    phys = _read_text(os.path.join(sysfs, "phys_addr"))
+    osd = _read_text(os.path.join(sysfs, "osd_name"))
+    phys_norm = phys.lower().replace(" ", "")
+    unplugged = phys_norm in ("f.f.f.f", "ffff")
+    adapter = os.path.exists(node) or os.path.isdir(sysfs)
+    return {
+        "adapter": adapter,
+        "device": node if os.path.exists(node) else "",
+        "phys_addr": phys,
+        "hdmi_link": bool(adapter and phys_norm and not unplugged),
+        "cecd": _cecd_on_bus(),
+        "osd_name": osd,
+    }
+
+
 def settings_path() -> str:
     root = os.environ.get("DECKY_PLUGIN_SETTINGS_DIR") or "/tmp/cec-remote"
     os.makedirs(root, exist_ok=True)

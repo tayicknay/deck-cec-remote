@@ -44,7 +44,17 @@ type PluginState = {
   reserved: { code: number; name: string }[];
   actions: string[];
   cecd_override?: boolean;
+  cec?: CecStatus;
   error?: string;
+};
+
+type CecStatus = {
+  adapter: boolean;
+  device: string;
+  phys_addr: string;
+  hdmi_link: boolean;
+  cecd: boolean;
+  osd_name: string;
 };
 
 type Recorded = {
@@ -396,6 +406,45 @@ function ErrorRows({ error }: { error: string }) {
   );
 }
 
+function yn(ok: boolean): string {
+  return ok ? "yes" : "no";
+}
+
+function CecDebug({ state }: { state: PluginState | null }) {
+  const cec = state?.cec;
+  const listening = Boolean(state?.watch_ready);
+  let hdmi = "unknown";
+  if (!cec?.adapter) hdmi = "no adapter";
+  else if (cec.hdmi_link) hdmi = `connected (${cec.phys_addr || "?"})`;
+  else if (cec.phys_addr) hdmi = `no link (${cec.phys_addr})`;
+  else hdmi = "adapter, no phys addr";
+  const line = [
+    `HDMI ${hdmi}`,
+    `cecd ${yn(Boolean(cec?.cecd))}`,
+    `listener ${listening ? "yes" : "no"}`,
+  ].join("  ·  ");
+  return (
+    <PanelSectionRow>
+      <div style={{ fontSize: "12px", opacity: 0.8, lineHeight: 1.45 }}>
+        {line}
+        {cec?.device ? (
+          <>
+            <br />
+            {cec.device}
+            {cec.osd_name ? `  ·  ${cec.osd_name}` : ""}
+          </>
+        ) : null}
+        {state?.watch_error ? (
+          <>
+            <br />
+            {state.watch_error}
+          </>
+        ) : null}
+      </div>
+    </PanelSectionRow>
+  );
+}
+
 function RecordedButton({ name }: { name: string }) {
   return (
     <PanelSectionRow>
@@ -445,6 +494,12 @@ function Content() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (pending || state?.recording) return;
+    const id = window.setInterval(() => void refresh(), 4000);
+    return () => window.clearInterval(id);
+  }, [pending, state?.recording, refresh]);
 
   useEffect(() => {
     const onRecorded = (payload: Recorded) => {
@@ -650,6 +705,9 @@ function Content() {
 
   return (
     <>
+      <PanelSection title="CEC">
+        <CecDebug state={state} />
+      </PanelSection>
       <PanelSection title="Mappings">
         <ErrorRows error={watchError} />
         <PanelSectionRow>

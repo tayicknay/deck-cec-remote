@@ -18,6 +18,7 @@ from cec_backend import (
     ACTIONS,
     RESERVED,
     action_for_code,
+    cec_status,
     cecd_fragment_path,
     default_settings,
     load_mappings,
@@ -57,6 +58,7 @@ class Plugin:
             "reserved": [{"code": code, "name": name} for code, name in RESERVED.items()],
             "actions": list(ACTIONS),
             "cecd_override": os.path.exists(cecd_fragment_path()),
+            "cec": cec_status(),
             "debug": session_debug(),
         }
 
