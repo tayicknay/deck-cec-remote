@@ -125,15 +125,52 @@ def _cecd_on_bus() -> bool:
         return False
 
 
+def _cec_ctl_info() -> dict[str, str]:
+    import subprocess
+
+    out: dict[str, str] = {}
+    cmd = "/usr/bin/cec-ctl" if os.path.exists("/usr/bin/cec-ctl") else "cec-ctl"
+    try:
+        proc = subprocess.run(
+            [cmd, "-d", "/dev/cec0"],
+            env=session_env(),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return out
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    if not text.strip():
+        return out
+    m = re.search(r"Physical Address\s*:\s*([0-9a-fA-F.]+)", text)
+    if m:
+        out["phys_addr"] = m.group(1).strip()
+    m = re.search(r"OSD Name\s*:\s*'([^']*)'", text)
+    if m:
+        out["osd_name"] = m.group(1).strip()
+    m = re.search(r"Adapter Name\s*:\s*(.+)", text)
+    if m:
+        out["adapter_name"] = m.group(1).strip()
+    m = re.search(r"Logical Address\s*:\s*(\d+)", text)
+    if m:
+        out["logical_addr"] = m.group(1).strip()
+    m = re.search(r"Driver Name\s*:\s*(.+)", text)
+    if m:
+        out["driver"] = m.group(1).strip()
+    return out
+
+
 def cec_status() -> dict[str, Any]:
-    """HDMI adapter + cecd presence. Does not open /dev/cec0."""
+    """HDMI adapter + cecd presence. Prefers cec-ctl; sysfs is missing on SteamOS."""
     sysfs = "/sys/class/cec/cec0"
     node = "/dev/cec0"
-    phys = _read_text(os.path.join(sysfs, "phys_addr"))
-    osd = _read_text(os.path.join(sysfs, "osd_name"))
+    ctl = _cec_ctl_info()
+    phys = ctl.get("phys_addr") or _read_text(os.path.join(sysfs, "phys_addr"))
+    osd = ctl.get("osd_name") or _read_text(os.path.join(sysfs, "osd_name"))
     phys_norm = phys.lower().replace(" ", "")
     unplugged = phys_norm in ("f.f.f.f", "ffff")
-    adapter = os.path.exists(node) or os.path.isdir(sysfs)
+    adapter = os.path.exists(node) or os.path.isdir(sysfs) or bool(ctl)
     return {
         "adapter": adapter,
         "device": node if os.path.exists(node) else "",
@@ -141,6 +178,9 @@ def cec_status() -> dict[str, Any]:
         "hdmi_link": bool(adapter and phys_norm and not unplugged),
         "cecd": _cecd_on_bus(),
         "osd_name": osd,
+        "adapter_name": ctl.get("adapter_name", ""),
+        "logical_addr": ctl.get("logical_addr", ""),
+        "driver": ctl.get("driver", ""),
     }
 
 
@@ -387,20 +427,35 @@ def cecd_fragment_path() -> str:
     return os.path.join(_deck_home(), ".config", "cecd", "config.d", FRAGMENT_NAME)
 
 
+def _toml_ok(body: str) -> bool:
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            return True
+    try:
+        data = tomllib.loads(body)
+    except Exception:
+        return False
+    mappings = data.get("mappings")
+    return isinstance(mappings, dict)
+
+
 def render_cecd_mappings(stolen: set[int]) -> str:
     lines = [
         "# Written by deck-cec-remote. Do not edit SteamOS 00-/99- files.",
         "# Full mappings table (cecd replaces compiled defaults if present).",
         "# Mapped numbers/colors (and overridden Steam keys) are omitted. Everything else stays.",
         "# Delete this file to restore defaults.",
-        "mappings = {",
+        "[mappings]",
     ]
     for keycode, names, codes in FACTORY_UINPUT:
         if any(code in stolen for code in codes):
             continue
         for name in names:
-            lines.append(f'  "{name}" = {keycode}')
-    lines.append("}")
+            lines.append(f'"{name}" = {keycode}')
     lines.append("")
     return "\n".join(lines)
 
@@ -415,8 +470,10 @@ def write_cecd_fragment(mappings: list[dict[str, Any]] | None = None) -> dict[st
         if os.path.exists(path):
             os.remove(path)
         return {"ok": True, "path": path, "removed": True, "stolen": []}
-    os.makedirs(parent, exist_ok=True)
     body = render_cecd_mappings(stolen)
+    if not _toml_ok(body):
+        return {"ok": False, "path": path, "removed": False, "stolen": sorted(stolen), "error": "invalid mappings toml"}
+    os.makedirs(parent, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(body)
@@ -435,6 +492,37 @@ def restore_cecd_defaults() -> dict[str, Any]:
     if os.path.exists(path):
         os.remove(path)
     return {"ok": True, "path": path, "removed": True}
+
+
+def start_cecd() -> dict[str, Any]:
+    """Start the user cecd.service (reclaims CEC LA / announces the Deck)."""
+    import subprocess
+
+    uid = _deck_uid()
+    env = session_env()
+    extra: dict[str, Any] = {
+        "env": env,
+        "capture_output": True,
+        "text": True,
+        "timeout": 8,
+    }
+    if uid is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
+        extra["user"] = uid
+        try:
+            extra["group"] = pwd.getpwuid(uid).pw_gid
+        except KeyError:
+            pass
+    try:
+        subprocess.run(["systemctl", "--user", "reset-failed", "cecd.service"], **extra)
+        proc = subprocess.run(["systemctl", "--user", "start", "cecd.service"], **extra)
+        if proc.returncode == 0:
+            return {"ok": True, "error": ""}
+        return {
+            "ok": False,
+            "error": (proc.stderr or proc.stdout or f"systemctl exit {proc.returncode}").strip(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def reload_cecd() -> dict[str, Any]:
@@ -469,5 +557,28 @@ def reload_cecd() -> dict[str, Any]:
 
 def sync_cecd_uinput(mappings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     written = write_cecd_fragment(mappings)
-    reloaded = reload_cecd()
-    return {**written, "reloaded": reloaded.get("ok"), "reload_error": reloaded.get("error", "")}
+    if not written.get("ok"):
+        return {**written, "reloaded": False, "started": False, "reload_error": written.get("error", "")}
+    if _cecd_on_bus():
+        reloaded = reload_cecd()
+        return {**written, "reloaded": reloaded.get("ok"), "reload_error": reloaded.get("error", "")}
+    started = start_cecd()
+    if started.get("ok"):
+        return {**written, "reloaded": False, "started": True, "reload_error": ""}
+    # A bad fragment bricks cecd on every boot. Drop ours and try SteamOS defaults.
+    path = cecd_fragment_path()
+    removed_bad = False
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+            removed_bad = True
+        except OSError:
+            pass
+        started = start_cecd()
+    return {
+        **written,
+        "reloaded": False,
+        "started": bool(started.get("ok")),
+        "removed_bad_fragment": removed_bad,
+        "reload_error": started.get("error", ""),
+    }

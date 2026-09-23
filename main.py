@@ -44,6 +44,7 @@ class Plugin:
     _last_code: int | None = None
     _last_ts = 0.0
     _pending: dict | None = None
+    _menu_open = False
 
     def _state(self):
         settings = load_settings()
@@ -65,8 +66,12 @@ class Plugin:
     def _sync_uinput(self) -> None:
         try:
             result = sync_cecd_uinput(load_mappings())
-            if not result.get("reloaded"):
-                decky.logger.warning("cecd reload: %s", result.get("reload_error"))
+            if result.get("reloaded"):
+                return
+            if result.get("started"):
+                decky.logger.info("cecd started")
+                return
+            decky.logger.warning("cecd reload: %s", result.get("reload_error"))
         except Exception as e:
             decky.logger.error("sync cecd uinput: %s", e)
 
@@ -85,6 +90,10 @@ class Plugin:
         self._recording = False
         self._pending = None
         return self._state()
+
+    async def set_menu_open(self, opened: bool):
+        self._menu_open = bool(opened)
+        return {"ok": True, "menu_open": self._menu_open}
 
     async def save_mapping(
         self,
@@ -170,10 +179,15 @@ class Plugin:
                 )
                 return
             self._pending = {"code": code, "name": name}
+            self._recording = False
             await decky.emit(
                 "cec_recorded",
                 {"ok": True, "reserved": False, "code": code, "name": name},
             )
+            return
+
+        # Plugin UI, or still choosing an action: do not run mappings (including QAM).
+        if self._pending or self._menu_open:
             return
 
         action = action_for_code(code)
@@ -291,11 +305,16 @@ class Plugin:
 
     async def _main(self):
         decky.logger.info("CEC Remote loaded debug=%s", session_debug())
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, self._sync_uinput)
+        except Exception as e:
+            decky.logger.error("cecd sync on load: %s", e)
         self._stop = asyncio.Event()
         self._watch_task = asyncio.create_task(self._watch_loop())
 
     async def _unload(self):
         decky.logger.info("CEC Remote unloaded")
+        self._menu_open = False
         if self._stop:
             self._stop.set()
         if self._watch_task:

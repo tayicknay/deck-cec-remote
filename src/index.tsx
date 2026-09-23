@@ -1,13 +1,19 @@
 import {
   ButtonItem,
+  DialogButton,
+  Focusable,
   ModalRoot,
+  NavEntryPositionPreferences,
   Navigation,
   PanelSection,
   PanelSectionRow,
+  SideMenu,
   ToggleField,
+  gamepadDialogClasses,
   getGamepadNavigationTrees,
   showModal,
   staticClasses,
+  useQuickAccessVisible,
   type ShowModalResult,
 } from "@decky/ui";
 import {
@@ -16,8 +22,8 @@ import {
   definePlugin,
   removeEventListener,
 } from "@decky/api";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { FaTv } from "react-icons/fa";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { FaInfoCircle, FaPlus, FaTrash, FaTv } from "react-icons/fa";
 
 type Mapping = {
   code: number;
@@ -55,6 +61,9 @@ type CecStatus = {
   hdmi_link: boolean;
   cecd: boolean;
   osd_name: string;
+  adapter_name?: string;
+  logical_addr?: string;
+  driver?: string;
 };
 
 type Recorded = {
@@ -95,6 +104,69 @@ const ACTION_LABELS: Record<string, string> = {
 /** USB HID F12 — Steam's default screenshot key. */
 const HID_F12 = 69;
 
+const COLOR_KEYS: Record<string, string> = {
+  red: "#e24b4b",
+  green: "#3cb371",
+  blue: "#4b8fe2",
+  yellow: "#d4b43c",
+};
+
+function buttonCaption(name: string): string {
+  const raw = (name || "").trim();
+  if (!raw) return "?";
+  if (/^\d+$/.test(raw)) return raw;
+  const slash = raw.split("/")[0];
+  const aliases: Record<string, string> = {
+    "select": "OK",
+    "back": "Back",
+    "guide": "Guide",
+    "blue": "Blue",
+    "red": "Red",
+    "green": "Green",
+    "yellow": "Yellow",
+  };
+  if (aliases[slash]) return aliases[slash];
+  return raw.replace(/-/g, " ");
+}
+
+function KeyTag({ name, size = "sm" }: { name: string; size?: "sm" | "lg" }) {
+  const raw = (name || "").trim() || "?";
+  const digit = /^\d+$/.test(raw);
+  const colorName = raw.toLowerCase().match(/^(red|green|blue|yellow)\b/)?.[1];
+  const accent = colorName ? COLOR_KEYS[colorName] : undefined;
+  const large = size === "lg";
+  return (
+    <span
+      title={raw}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        boxSizing: "border-box",
+        minWidth: digit ? (large ? 36 : 28) : undefined,
+        padding: large ? (digit ? "6px 10px" : "6px 12px") : digit ? "2px 7px" : "2px 9px",
+        borderRadius: large ? 8 : 6,
+        border: `1px solid ${accent || "rgba(255,255,255,0.38)"}`,
+        background: accent ? `${accent}33` : "rgba(255,255,255,0.08)",
+        boxShadow: "inset 0 -1px 0 rgba(0,0,0,0.35), 0 1px 0 rgba(255,255,255,0.1)",
+        fontFamily: digit
+          ? 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace'
+          : "inherit",
+        fontWeight: 700,
+        fontSize: large ? (digit ? 22 : 16) : digit ? 14 : 12,
+        lineHeight: 1.15,
+        letterSpacing: digit ? 0 : "0.02em",
+        textTransform: digit ? "none" : "capitalize",
+        color: accent || "inherit",
+        verticalAlign: "middle",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {buttonCaption(raw)}
+    </span>
+  );
+}
+
 const getState = callable<[], PluginState>("get_state");
 const startRecord = callable<[], PluginState>("start_record");
 const cancelRecord = callable<[], PluginState>("cancel_record");
@@ -107,6 +179,10 @@ const setOverrideSteamButtons = callable<[enabled: boolean], PluginState>(
   "set_override_steam_buttons"
 );
 const resetAll = callable<[], PluginState>("reset_all");
+const setMenuOpen = callable<[opened: boolean], { ok: boolean }>("set_menu_open");
+
+/** True while CEC Remote's QAM panel is on screen. Mapped actions (including QAM) stay idle. */
+let pluginMenusOpen = false;
 
 function navTreeVisible(match: (id: string) => boolean): boolean {
   try {
@@ -161,12 +237,31 @@ async function toggleCheatSheet(): Promise<void> {
     /* still show an empty sheet */
   }
   Navigation.CloseSideMenus();
+  const closeKey = mappings.find((m) => m.action === "cheat_sheet");
   cheatSheetModal = showModal(
     <ModalRoot closeModal={closeCheatSheet} bAllowFullSize={false}>
       <div style={{ padding: "8px 12px 16px", minWidth: "280px" }}>
         <div style={{ fontSize: "20px", fontWeight: 700, marginBottom: "6px" }}>CEC mappings</div>
-        <div style={{ fontSize: "12px", opacity: 0.7, marginBottom: "14px" }}>
-          Mapped buttons only. Press the cheat-sheet key again to close.
+        <div
+          style={{
+            fontSize: "12px",
+            opacity: 0.85,
+            marginBottom: "14px",
+            display: "flex",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "6px",
+            lineHeight: 1.45,
+          }}
+        >
+          <span>Mapped buttons only.</span>
+          {closeKey ? (
+            <>
+              <span>Press</span>
+              <KeyTag name={closeKey.name} />
+              <span>again to close.</span>
+            </>
+          ) : null}
         </div>
         {mappings.length === 0 ? (
           <div style={{ fontSize: "14px", opacity: 0.75 }}>No custom mappings yet</div>
@@ -177,14 +272,15 @@ async function toggleCheatSheet(): Promise<void> {
               style={{
                 display: "flex",
                 justifyContent: "space-between",
+                alignItems: "center",
                 gap: "16px",
                 fontSize: "15px",
                 lineHeight: 1.45,
-                padding: "6px 0",
+                padding: "8px 0",
                 borderBottom: "1px solid rgba(255,255,255,0.08)",
               }}
             >
-              <span style={{ fontWeight: 600 }}>{m.name}</span>
+              <KeyTag name={m.name} />
               <span style={{ opacity: 0.85, textAlign: "right" }}>{actionLabel(m)}</span>
             </div>
           ))
@@ -231,6 +327,21 @@ function takeScreenshot(): void {
   }
 }
 
+function menuStore(): any {
+  return focusedWindow()?.MenuStore;
+}
+
+/** Reopen QAM without selecting a tab. OpenQuickAccessMenu() with no arg sets the tab to undefined → Notifications. */
+function toggleQam(): void {
+  if (isQamOpen()) {
+    Navigation.CloseSideMenus();
+    return;
+  }
+  const menu = menuStore();
+  if (typeof menu?.OpenSideMenu === "function") menu.OpenSideMenu(SideMenu.QuickAccess);
+  else Navigation.OpenSideMenu(SideMenu.QuickAccess);
+}
+
 function showKeyboard(): void {
   const vk = focusedWindow()?.VirtualKeyboardManager;
   if (vk) {
@@ -259,8 +370,7 @@ function runAction(payload: ActionPayload | string): void {
   const appid = typeof payload === "string" ? undefined : payload.appid;
   switch (action) {
     case "qam":
-      if (isQamOpen()) Navigation.CloseSideMenus();
-      else Navigation.OpenQuickAccessMenu();
+      toggleQam();
       break;
     case "steam_menu":
       if (isSteamMenuOpen()) Navigation.CloseSideMenus();
@@ -406,59 +516,242 @@ function ErrorRows({ error }: { error: string }) {
   );
 }
 
-function yn(ok: boolean): string {
-  return ok ? "yes" : "no";
+function cecStatusLabel(state: PluginState | null): string {
+  const cec = state?.cec;
+  if (!cec?.adapter) return "not detected";
+  if (cec.cecd && cec.hdmi_link) return "working";
+  return "not working";
 }
 
-function CecDebug({ state }: { state: PluginState | null }) {
-  const cec = state?.cec;
-  const listening = Boolean(state?.watch_ready);
-  let hdmi = "unknown";
-  if (!cec?.adapter) hdmi = "no adapter";
-  else if (cec.hdmi_link) hdmi = `connected (${cec.phys_addr || "?"})`;
-  else if (cec.phys_addr) hdmi = `no link (${cec.phys_addr})`;
-  else hdmi = "adapter, no phys addr";
-  const line = [
-    `HDMI ${hdmi}`,
-    `cecd ${yn(Boolean(cec?.cecd))}`,
-    `listener ${listening ? "yes" : "no"}`,
-  ].join("  ·  ");
+function TitleRow({ title, action }: { title: ReactNode; action?: ReactNode }) {
   return (
     <PanelSectionRow>
-      <div style={{ fontSize: "12px", opacity: 0.8, lineHeight: 1.45 }}>
-        {line}
-        {cec?.device ? (
-          <>
-            <br />
-            {cec.device}
-            {cec.osd_name ? `  ·  ${cec.osd_name}` : ""}
-          </>
-        ) : null}
-        {state?.watch_error ? (
-          <>
-            <br />
-            {state.watch_error}
-          </>
-        ) : null}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          minWidth: 0,
+        }}
+      >
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>{title}</div>
+        {action}
       </div>
     </PanelSectionRow>
   );
 }
 
-function RecordedButton({ name }: { name: string }) {
+function yn(ok: boolean): string {
+  return ok ? "yes" : "no";
+}
+
+function DebugLine({ label, value }: { label: string; value: string }) {
   return (
     <PanelSectionRow>
-      <div
-        style={{
-          fontSize: "16px",
-          fontWeight: 600,
-          lineHeight: 1.3,
-          padding: "4px 0 18px",
-        }}
-      >
-        {name}
+      <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+        <div style={{ opacity: 0.65, fontSize: "12px" }}>{label}</div>
+        <div style={{ fontWeight: 600, marginTop: 2 }}>{value}</div>
       </div>
     </PanelSectionRow>
+  );
+}
+
+function CecStatusView({
+  state,
+  onBack,
+}: {
+  state: PluginState | null;
+  onBack: () => void;
+}) {
+  const cec = state?.cec;
+  let hdmi = "unknown";
+  if (!cec?.adapter) hdmi = "no adapter";
+  else if (cec.hdmi_link) hdmi = "connected";
+  else if (cec.phys_addr) hdmi = "no link";
+  else hdmi = "adapter present";
+  return (
+    <PanelSection title="CEC status">
+      <DebugLine label="HDMI" value={hdmi} />
+      <DebugLine label="Physical address" value={cec?.phys_addr || "—"} />
+      <DebugLine label="Adapter" value={cec?.adapter_name || "—"} />
+      <DebugLine label="Device" value={cec?.device || "—"} />
+      <DebugLine label="OSD name" value={cec?.osd_name || "—"} />
+      <DebugLine label="Logical address" value={cec?.logical_addr || "—"} />
+      <DebugLine label="Driver" value={cec?.driver || "—"} />
+      <DebugLine label="cecd" value={yn(Boolean(cec?.cecd))} />
+      <DebugLine label="Listener" value={state?.watch_ready ? "yes" : "no"} />
+      {state?.watch_error ? (
+        <PanelSectionRow>
+          <div style={{ color: "#f88", fontSize: "12px", lineHeight: 1.35 }}>{state.watch_error}</div>
+        </PanelSectionRow>
+      ) : null}
+      <PanelSectionRow>
+        <FocusDefault>
+          <ButtonItem layout="below" onClick={onBack}>
+            Back
+          </ButtonItem>
+        </FocusDefault>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
+function RecordedButton({ name }: { name: string }) {
+  return (
+    <div style={{ padding: "4px 0 14px" }}>
+      <KeyTag name={name} size="lg" />
+    </div>
+  );
+}
+
+function PluginScreen({
+  children,
+  onGamepadBack,
+}: {
+  children: ReactNode;
+  onGamepadBack?: () => void;
+}) {
+  return (
+    <Focusable
+      flow-children="column"
+      navEntryPreferPosition={NavEntryPositionPreferences.PREFERRED_CHILD}
+      onCancelButton={
+        onGamepadBack
+          ? (evt) => {
+              onGamepadBack();
+              evt.stopPropagation();
+            }
+          : undefined
+      }
+    >
+      {children}
+    </Focusable>
+  );
+}
+
+const ICON_BTN: CSSProperties = {
+  width: 32,
+  minWidth: 32,
+  maxWidth: 32,
+  height: 32,
+  padding: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  boxSizing: "border-box",
+};
+
+function IconButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  const className = [
+    gamepadDialogClasses?.Button,
+    gamepadDialogClasses?.NoMinWidth,
+    gamepadDialogClasses?.HighlightOnFocus,
+    gamepadDialogClasses?.["ItemFocusAnim-translucent-white-20"],
+    gamepadDialogClasses?.["ItemFocusAnimBorder-darkGrey"],
+    gamepadDialogClasses?.focusAnimation,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <div style={{ width: 32, minWidth: 32, maxWidth: 32, flex: "0 0 32px", overflow: "visible" }}>
+      <DialogButton
+        disabled={disabled}
+        noFocusRing={false}
+        className={className}
+        style={{
+          ...ICON_BTN,
+          opacity: disabled ? 0.4 : 1,
+        }}
+        onClick={() => onClick()}
+      >
+        {children}
+      </DialogButton>
+    </div>
+  );
+}
+
+function MappingRow({
+  mapping,
+  busy,
+  onDelete,
+  first = false,
+}: {
+  mapping: Mapping;
+  busy: boolean;
+  onDelete: (code: number) => void;
+  first?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        paddingTop: first ? 6 : 4,
+        paddingBottom: 4,
+        overflow: "visible",
+      }}
+    >
+      <PanelSectionRow>
+        <Focusable
+          flow-children="row"
+          navEntryPreferPosition={NavEntryPositionPreferences.FIRST}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            width: "100%",
+            minWidth: 0,
+            minHeight: 40,
+            overflow: "visible",
+          }}
+        >
+          <div
+            style={{
+              flex: "1 1 0",
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: "16px",
+              fontWeight: 600,
+              lineHeight: "40px",
+            }}
+          >
+            {actionLabel(mapping)}
+          </div>
+          <IconButton disabled={busy} onClick={() => void onDelete(mapping.code)}>
+            <FaTrash />
+          </IconButton>
+        </Focusable>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <KeyTag name={mapping.name} />
+      </PanelSectionRow>
+    </div>
+  );
+}
+
+function FocusDefault({ children }: { children: ReactNode }) {
+  const navRef = useRef<any>(null);
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      const node = navRef.current;
+      if (typeof node?.TakeFocus === "function") node.TakeFocus();
+      else if (typeof node?.focus === "function") node.focus();
+    }, 30);
+    return () => window.clearTimeout(id);
+  }, []);
+  return (
+    <Focusable ref={navRef} preferredFocus={true} autoFocus={true} {...({ navRef } as object)}>
+      {children}
+    </Focusable>
   );
 }
 
@@ -467,10 +760,21 @@ function Content() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pending, setPending] = useState<Pending | null>(null);
-  const [reservedHint, setReservedHint] = useState("");
+  const [reservedHint, setReservedHint] = useState<ReactNode>(null);
   const [resetArmed, setResetArmed] = useState(false);
   const [pickingLaunch, setPickingLaunch] = useState(false);
+  const [showingCec, setShowingCec] = useState(false);
   const reservedShown = useRef(false);
+  const qamVisible = useQuickAccessVisible();
+
+  useEffect(() => {
+    pluginMenusOpen = qamVisible;
+    void setMenuOpen(qamVisible).catch(() => {});
+    return () => {
+      pluginMenusOpen = false;
+      void setMenuOpen(false).catch(() => {});
+    };
+  }, [qamVisible]);
 
   const apply = useCallback((next: PluginState) => {
     setState(next);
@@ -507,7 +811,10 @@ function Content() {
         if (!reservedShown.current) {
           reservedShown.current = true;
           setReservedHint(
-            `${payload.name} is used by Steam. Turn on Override Steam buttons to map it.`
+            <span style={{ display: "inline-flex", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+              <KeyTag name={payload.name} />
+              <span>is used by Steam. Turn on Override Steam buttons to map it.</span>
+            </span>
           );
         }
         return;
@@ -520,12 +827,13 @@ function Content() {
     return () => removeEventListener("cec_recorded", onRecorded);
   }, [refresh]);
 
-  const onAdd = async () => {
+  const beginRecord = async () => {
     setBusy(true);
     setError("");
     reservedShown.current = false;
     setReservedHint("");
     setPickingLaunch(false);
+    setShowingCec(false);
     try {
       apply(await startRecord());
     } catch (e) {
@@ -622,118 +930,217 @@ function Content() {
   const override = Boolean(state?.override_steam_buttons);
   const actionIds = state?.actions?.length ? state.actions : Object.keys(ACTION_LABELS);
   const watchError = !state?.watch_ready ? state?.watch_error || error : error;
-  const screen = pickingLaunch && pending ? "launch" : pending ? "pick" : recording ? "record" : "home";
+  const screen =
+    showingCec && !pending && !recording
+      ? "cec"
+      : pickingLaunch && pending
+        ? "launch"
+        : pending
+          ? "pick"
+          : recording
+            ? "record"
+            : "home";
+
+  if (screen === "cec") {
+    return (
+      <PluginScreen onGamepadBack={() => setShowingCec(false)}>
+        <CecStatusView state={state} onBack={() => setShowingCec(false)} />
+      </PluginScreen>
+    );
+  }
 
   if (screen === "record") {
     return (
-      <PanelSection title="Record button">
-        <ErrorRows error={watchError} />
-        <PanelSectionRow>
-          <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
-            {override
-              ? "Press a TV remote button."
-              : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons."}
-          </div>
-        </PanelSectionRow>
-        {reservedHint ? (
+      <PluginScreen onGamepadBack={() => void onCancel()}>
+        <PanelSection title="Record button">
+          <ErrorRows error={watchError} />
           <PanelSectionRow>
-            <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
+            <div style={{ fontSize: "13px", lineHeight: 1.4 }}>
+              {override
+                ? "Press a TV remote button."
+                : "Press a TV remote button. D-pad, OK, Back, and play keys stay with Steam unless you enable Override Steam buttons."}
+            </div>
           </PanelSectionRow>
-        ) : null}
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
-            Cancel
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
+          {reservedHint ? (
+            <PanelSectionRow>
+              <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
+            </PanelSectionRow>
+          ) : null}
+          <PanelSectionRow>
+            <FocusDefault>
+              <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
+                Cancel
+              </ButtonItem>
+            </FocusDefault>
+          </PanelSectionRow>
+        </PanelSection>
+      </PluginScreen>
     );
   }
 
   if (screen === "pick") {
+    const lastAction = actionIds.length - 1;
     return (
-      <PanelSection title="Choose action">
-        <ErrorRows error={watchError} />
-        <RecordedButton name={pending?.name || ""} />
-        {reservedHint ? (
+      <PluginScreen onGamepadBack={() => void onCancel()}>
+        <PanelSection title="Choose action">
+          <ErrorRows error={watchError} />
+          <RecordedButton name={pending?.name || ""} />
           <PanelSectionRow>
-            <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
-          </PanelSectionRow>
-        ) : null}
-        {actionIds.map((id) => (
-          <PanelSectionRow key={id}>
-            <ButtonItem layout="below" onClick={() => void onPickAction(id)} disabled={busy}>
-              {actionLabel(id)}
+            <ButtonItem
+              layout="below"
+              bottomSeparator="standard"
+              onClick={() => void beginRecord()}
+              disabled={busy}
+            >
+              Change
             </ButtonItem>
           </PanelSectionRow>
-        ))}
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void onCancel()} disabled={busy}>
-            Cancel
-          </ButtonItem>
-        </PanelSectionRow>
-      </PanelSection>
+          {reservedHint ? (
+            <PanelSectionRow>
+              <div style={{ fontSize: "13px", lineHeight: 1.4 }}>{reservedHint}</div>
+            </PanelSectionRow>
+          ) : null}
+          {actionIds.map((id, i) => (
+            <PanelSectionRow key={id}>
+              {i === 0 ? (
+                <FocusDefault>
+                  <ButtonItem
+                    layout="below"
+                    bottomSeparator={i === lastAction ? "standard" : "none"}
+                    onClick={() => void onPickAction(id)}
+                    disabled={busy}
+                  >
+                    {actionLabel(id)}
+                  </ButtonItem>
+                </FocusDefault>
+              ) : (
+                <ButtonItem
+                  layout="below"
+                  bottomSeparator={i === lastAction ? "standard" : "none"}
+                  onClick={() => void onPickAction(id)}
+                  disabled={busy}
+                >
+                  {actionLabel(id)}
+                </ButtonItem>
+              )}
+            </PanelSectionRow>
+          ))}
+          <PanelSectionRow>
+            <ButtonItem layout="below" bottomSeparator="none" onClick={() => void onCancel()} disabled={busy}>
+              Cancel
+            </ButtonItem>
+          </PanelSectionRow>
+        </PanelSection>
+      </PluginScreen>
     );
   }
 
   if (screen === "launch") {
     const apps = listLibraryApps();
     return (
-      <PanelSection title="Launch">
-        <ErrorRows error={watchError} />
-        <RecordedButton name={pending?.name || ""} />
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => setPickingLaunch(false)} disabled={busy}>
-            Back
-          </ButtonItem>
-        </PanelSectionRow>
-        {apps.length === 0 ? (
+      <PluginScreen onGamepadBack={() => setPickingLaunch(false)}>
+        <PanelSection title="Launch">
+          <ErrorRows error={watchError} />
+          <RecordedButton name={pending?.name || ""} />
           <PanelSectionRow>
-            <div style={{ opacity: 0.7, fontSize: "13px" }}>No games or programs found</div>
-          </PanelSectionRow>
-        ) : (
-          apps.map((app) => (
-            <PanelSectionRow key={app.appid}>
-              <ButtonItem layout="below" onClick={() => void onPickApp(app)} disabled={busy}>
-                {app.name}
+            {apps.length === 0 ? (
+              <FocusDefault>
+                <ButtonItem layout="below" onClick={() => setPickingLaunch(false)} disabled={busy}>
+                  Back
+                </ButtonItem>
+              </FocusDefault>
+            ) : (
+              <ButtonItem layout="below" onClick={() => setPickingLaunch(false)} disabled={busy}>
+                Back
               </ButtonItem>
+            )}
+          </PanelSectionRow>
+          {apps.length === 0 ? (
+            <PanelSectionRow>
+              <div style={{ opacity: 0.7, fontSize: "13px" }}>No games or programs found</div>
             </PanelSectionRow>
-          ))
-        )}
-      </PanelSection>
+          ) : (
+            apps.map((app, i) => (
+              <PanelSectionRow key={app.appid}>
+                {i === 0 ? (
+                  <FocusDefault>
+                    <ButtonItem layout="below" onClick={() => void onPickApp(app)} disabled={busy}>
+                      {app.name}
+                    </ButtonItem>
+                  </FocusDefault>
+                ) : (
+                  <ButtonItem layout="below" onClick={() => void onPickApp(app)} disabled={busy}>
+                    {app.name}
+                  </ButtonItem>
+                )}
+              </PanelSectionRow>
+            ))
+          )}
+        </PanelSection>
+      </PluginScreen>
     );
   }
 
   return (
-    <>
-      <PanelSection title="CEC">
-        <CecDebug state={state} />
-      </PanelSection>
-      <PanelSection title="Mappings">
-        <ErrorRows error={watchError} />
+    <PluginScreen>
+      <PanelSection>
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void onAdd()} disabled={busy || !state?.watch_ready}>
-            Add mapping
-          </ButtonItem>
+          <div style={{ fontSize: "12px", opacity: 0.75, lineHeight: 1.35 }}>
+            Note: bindings are disabled while this menu is open
+          </div>
         </PanelSectionRow>
+        <TitleRow
+          title={
+            <div style={{ fontSize: "14px", lineHeight: "32px" }}>
+              CEC status: {cecStatusLabel(state)}
+            </div>
+          }
+          action={
+            <IconButton onClick={() => setShowingCec(true)}>
+              <FaInfoCircle />
+            </IconButton>
+          }
+        />
+      </PanelSection>
+      <div style={{ marginTop: -4 }}>
+        <PanelSection>
+        <TitleRow
+          title={
+            <div className={staticClasses.PanelSectionTitle} style={{ padding: 0, margin: 0 }}>
+              Mappings
+            </div>
+          }
+          action={
+            <FocusDefault>
+              <IconButton
+                disabled={busy || !state?.watch_ready}
+                onClick={() => void beginRecord()}
+              >
+                <FaPlus />
+              </IconButton>
+            </FocusDefault>
+          }
+        />
+        <ErrorRows error={watchError} />
         {mappings.length === 0 ? (
           <PanelSectionRow>
             <div style={{ opacity: 0.7, fontSize: "13px" }}>No mappings yet</div>
           </PanelSectionRow>
         ) : (
-          mappings.map((m) => (
-            <PanelSectionRow key={m.code}>
-              <ButtonItem
-                label={`${m.name} → ${actionLabel(m)}`}
-                layout="below"
-                onClick={() => void onDelete(m.code)}
-                disabled={busy}
-              >
-                Remove
-              </ButtonItem>
-            </PanelSectionRow>
-          ))
+          <div style={{ overflow: "visible" }}>
+            {mappings.map((m, i) => (
+              <MappingRow
+                key={m.code}
+                mapping={m}
+                busy={busy}
+                first={i === 0}
+                onDelete={(code) => void onDelete(code)}
+              />
+            ))}
+          </div>
         )}
-      </PanelSection>
+        </PanelSection>
+      </div>
       <PanelSection title="Settings">
         <PanelSectionRow>
           <ToggleField
@@ -750,12 +1157,13 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
-    </>
+    </PluginScreen>
   );
 }
 
 export default definePlugin(() => {
   addEventListener("cec_action", (payload: ActionPayload | string) => {
+    if (pluginMenusOpen) return;
     runAction(payload);
   });
 
